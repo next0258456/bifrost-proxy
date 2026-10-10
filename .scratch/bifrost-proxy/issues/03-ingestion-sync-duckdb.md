@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Khởi tạo thành công Embedded DuckDB (CGO) và load 2 extensions `iceberg`, `ducklake`.
-- [ ] Endpoint `POST` nhận payload Compare-And-Swap chuẩn Iceberg.
-- [ ] Thực thi query DuckDB thành công để đồng bộ Iceberg Metadata sang định dạng DuckLake lưu trên S3.
-- [ ] End-to-end Test: Gọi HTTP POST, sau đó kiểm tra S3 xác nhận file DuckLake được sinh ra đúng chuẩn.
+- [x] Khởi tạo thành công Embedded DuckDB (CGO) và load 2 extensions `iceberg`, `ducklake`.
+- [x] Endpoint `POST` nhận payload Compare-And-Swap chuẩn Iceberg.
+- [x] Thực thi query DuckDB thành công để đồng bộ Iceberg Metadata sang định dạng DuckLake lưu trên S3.
+- [x] End-to-end Test: Gọi HTTP POST, sau đó kiểm tra S3 xác nhận file DuckLake được sinh ra đúng chuẩn.

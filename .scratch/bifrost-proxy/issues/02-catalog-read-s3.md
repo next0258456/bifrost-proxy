@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Tích hợp MinIO SDK / AWS SDK vào project Golang.
-- [ ] Endpoint `GET /v1/namespaces/{ns}/tables/{table}` kết nối S3 lấy và trả về nội dung metadata.
-- [ ] Trả về mã lỗi 404 NoSuchTable hợp lý nếu file trên S3 chưa tồn tại.
-- [ ] Viết Integration test xác nhận việc móc nối vào Object Storage thành công.
+- [x] Tích hợp MinIO SDK / AWS SDK vào project Golang.
+- [x] Endpoint `GET /v1/namespaces/{ns}/tables/{table}` kết nối S3 lấy và trả về nội dung metadata.
+- [x] Trả về mã lỗi 404 NoSuchTable hợp lý nếu file trên S3 chưa tồn tại.
+- [x] Viết Integration test xác nhận việc móc nối vào Object Storage thành công.
