@@ -6,6 +6,6 @@
 
 **Status:** ready-for-agent
 
-- [ ] Project Golang được khởi tạo thành công với các dependencies (Fiber/Gin).
-- [ ] Endpoint `POST /v1/oauth/tokens` trả về mã 200 OK kèm payload JSON Fake Token theo chuẩn Iceberg.
-- [ ] Có Unit Test / HTTP Mock Test xác nhận endpoint hoạt động với độ trễ tối thiểu (< 5ms).
+- [x] Project Golang được khởi tạo thành công với các dependencies (Fiber/Gin).
+- [x] Endpoint `POST /v1/oauth/tokens` trả về mã 200 OK kèm payload JSON Fake Token theo chuẩn Iceberg.
+- [x] Có Unit Test / HTTP Mock Test xác nhận endpoint hoạt động với độ trễ tối thiểu (< 5ms).

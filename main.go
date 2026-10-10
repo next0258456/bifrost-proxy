@@ -2,8 +2,11 @@ package main
 
 import (
 	"log"
+	"os"
 
 	"bifrost-proxy/api"
+	"bifrost-proxy/engine"
+	"bifrost-proxy/storage"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -14,7 +17,27 @@ func main() {
 		DisableStartupMessage: true,
 	})
 
+	// 1. Storage setup
+	endpoint := os.Getenv("S3_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "localhost:9000"
+	}
+	store, err := storage.NewMinioStorage(endpoint, "minioadmin", "minioadmin", "iceberg")
+	if err != nil {
+		log.Printf("Warning: Failed to init real S3 storage: %v", err)
+	}
+
+	// 2. DuckDB Engine setup
+	syncEngine, err := engine.NewSyncEngine()
+	if err != nil {
+		log.Printf("Warning: Failed to init DuckDB engine: %v", err)
+	} else {
+		defer syncEngine.Close()
+	}
+
+	// 3. Mount Routes
 	api.SetupAuthRoutes(app)
+	api.SetupCatalogRoutes(app, store, syncEngine)
 
 	log.Println("Bifrost Proxy is starting on :8080...")
 	log.Fatal(app.Listen(":8080"))
