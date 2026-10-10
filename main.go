@@ -22,7 +22,23 @@ func main() {
 	if endpoint == "" {
 		endpoint = "localhost:9000"
 	}
-	store, err := storage.NewMinioStorage(endpoint, "minioadmin", "minioadmin", "iceberg")
+	
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	if accessKey == "" {
+		accessKey = "admin"
+	}
+	
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	if secretKey == "" {
+		secretKey = "password"
+	}
+
+	bucket := os.Getenv("S3_BUCKET")
+	if bucket == "" {
+		bucket = "lakehouse"
+	}
+
+	store, err := storage.NewMinioStorage(endpoint, accessKey, secretKey, bucket)
 	if err != nil {
 		log.Printf("Warning: Failed to init real S3 storage: %v", err)
 	}
