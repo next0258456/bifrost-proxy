@@ -6,6 +6,6 @@
 
 **Status:** ready-for-agent
 
-- [ ] Parse `snapshot-id` từ payload `UpdateTableRequest` trong `api/catalog.go`.
-- [ ] Xử lý giá trị trả về của `queue.Submit()`: nếu `false`, trả về `HTTP 429 Too Many Requests`.
-- [ ] Viết unit test xác nhận khi queue đầy thì client nhận mã 429 kèm error JSON chuẩn.
+- [x] Parse `snapshot-id` từ payload `UpdateTableRequest` trong `api/catalog.go`.
+- [x] Xử lý giá trị trả về của `queue.Submit()`: nếu `false`, trả về `HTTP 429 Too Many Requests`.
+- [x] Viết unit test xác nhận khi queue đầy thì client nhận mã 429 kèm error JSON chuẩn.

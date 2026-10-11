@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Lấy chính xác `metadataLocation` từ `catalogStore.GetTablePointer(ctx, ns, table)`.
-- [ ] Thêm phương thức đọc file metadata theo đường dẫn cụ thể trong `StorageService` (`GetMetadataByLocation(ctx, location)`).
-- [ ] Endpoint `GET` trong `api/catalog.go` đọc đúng file từ đường dẫn này thay vì đường dẫn hardcode.
-- [ ] Viết unit test xác nhận `GET` trả về đúng nội dung của file được trỏ bởi Postgres.
+- [x] Lấy chính xác `metadataLocation` từ `catalogStore.GetTablePointer(ctx, ns, table)`.
+- [x] Thêm phương thức đọc file metadata theo đường dẫn cụ thể trong `StorageService` (`GetMetadataByLocation(ctx, location)`).
+- [x] Endpoint `GET` trong `api/catalog.go` đọc đúng file từ đường dẫn này thay vì đường dẫn hardcode.
+- [x] Viết unit test xác nhận `GET` trả về đúng nội dung của file được trỏ bởi Postgres.
