@@ -64,6 +64,11 @@ func (e *SyncEngine) SetStorage(store storage.StorageService) {
 	e.store = store
 }
 
+// NewTestSyncEngine creates a SyncEngine wrapping an existing database connection for unit testing.
+func NewTestSyncEngine(db *sql.DB, store storage.StorageService) *SyncEngine {
+	return &SyncEngine{db: db, store: store}
+}
+
 func (e *SyncEngine) Close() {
 	if e.db != nil {
 		e.db.Close()

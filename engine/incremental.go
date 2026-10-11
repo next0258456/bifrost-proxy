@@ -15,6 +15,7 @@ type IcebergMetadata struct {
 	FormatVersion      int             `json:"format-version"`
 	TableUUID          string          `json:"table-uuid"`
 	CurrentSnapshotID  int64           `json:"current-snapshot-id"`
+	CurrentSchemaID    int             `json:"current-schema-id"`
 	LastSequenceNumber int64           `json:"last-sequence-number"`
 	Schemas            []SchemaEntry   `json:"schemas"`
 	Snapshots          []SnapshotEntry `json:"snapshots"`
@@ -129,13 +130,16 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 
 	// 4. Ghi nhận snapshot mới vào ducklake_catalog.ducklake_snapshot
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
-	snapshotSQL := `
-		INSERT INTO ducklake_catalog.ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id)
-		VALUES ($1, $2, 1, 100, 1000)
-		ON CONFLICT DO NOTHING;
-	`
-	if _, err := e.db.Exec(snapshotSQL, snapshotID, now); err != nil {
-		return fmt.Errorf("failed to insert snapshot into ducklake: %w", err)
+	var snapExists int
+	_ = e.db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = $1;", snapshotID).Scan(&snapExists)
+	if snapExists == 0 {
+		snapshotSQL := `
+			INSERT INTO ducklake_catalog.ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id)
+			VALUES ($1, $2, 1, 100, 1000);
+		`
+		if _, err := e.db.Exec(snapshotSQL, snapshotID, now); err != nil {
+			return fmt.Errorf("failed to insert snapshot into ducklake: %w", err)
+		}
 	}
 
 	// 5. Trích xuất file Parquet THẬT từ metadata / Avro manifest list & manifests
@@ -157,6 +161,7 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 				FileSizeInBytes: f.FileSizeInBytes,
 				RecordCount:     f.RecordCount,
 				Content:         f.Content,
+				ReferencedPath:  f.ReferencedPath,
 			})
 		}
 	}
@@ -198,18 +203,58 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		}
 	}
 
-	// 6. Xử lý Schema Evolution động: trích xuất danh sách cột thật từ meta.Schemas
+	// 6. Xử lý Schema Evolution động: đối chiếu danh sách cột và cập nhật begin/end_snapshot
 	if meta != nil && len(meta.Schemas) > 0 {
-		activeSchema := meta.Schemas[len(meta.Schemas)-1]
+		var activeSchema *SchemaEntry
+		for i := range meta.Schemas {
+			if meta.Schemas[i].SchemaID == meta.CurrentSchemaID {
+				activeSchema = &meta.Schemas[i]
+				break
+			}
+		}
+		if activeSchema == nil {
+			activeSchema = &meta.Schemas[len(meta.Schemas)-1]
+		}
+
+		// Truy vấn danh sách cột đang active trong DuckLake
+		activeCols := make(map[int]bool)
+		rows, err := e.db.Query("SELECT column_id FROM ducklake_catalog.ducklake_column WHERE table_id = $1 AND end_snapshot IS NULL;", tableID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var cid int
+				if err := rows.Scan(&cid); err == nil {
+					activeCols[cid] = true
+				}
+			}
+		}
+
+		newCols := make(map[int]bool)
 		for orderIdx, f := range activeSchema.Fields {
-			columnSQL := `
-				INSERT INTO ducklake_catalog.ducklake_column 
-				(column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type)
-				VALUES ($1, $2, NULL, $3, $4, $5, $6)
-				ON CONFLICT DO NOTHING;
-			`
-			if _, err := e.db.Exec(columnSQL, f.ID, snapshotID, tableID, orderIdx+1, f.Name, f.Type); err != nil {
-				return fmt.Errorf("failed to insert column %s into ducklake: %w", f.Name, err)
+			newCols[f.ID] = true
+			if !activeCols[f.ID] {
+				columnSQL := `
+					INSERT INTO ducklake_catalog.ducklake_column 
+					(column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type)
+					VALUES ($1, $2, NULL, $3, $4, $5, $6);
+				`
+				if _, err := e.db.Exec(columnSQL, f.ID, snapshotID, tableID, orderIdx+1, f.Name, f.Type); err != nil {
+					return fmt.Errorf("failed to insert column %s into ducklake: %w", f.Name, err)
+				}
+			}
+		}
+
+		// Đánh dấu end_snapshot cho các cột đã bị xóa
+		for cid := range activeCols {
+			if !newCols[cid] {
+				dropSQL := `
+					UPDATE ducklake_catalog.ducklake_column 
+					SET end_snapshot = $1 
+					WHERE table_id = $2 AND column_id = $3 AND end_snapshot IS NULL;
+				`
+				if _, err := e.db.Exec(dropSQL, snapshotID, tableID, cid); err != nil {
+					return fmt.Errorf("failed to update dropped column %d end_snapshot: %w", cid, err)
+				}
 			}
 		}
 	}
