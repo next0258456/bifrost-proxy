@@ -1,52 +1,56 @@
-# Đặc tả Kỹ thuật: Độ Chính Xác Nghiệp Vụ Ingestion & Sync DuckLake (Business Accuracy Spec)
+# Đặc tả Kỹ thuật Tổng hợp: Chuẩn Xác Nghiệp Vụ & Tiêu Chuẩn Thiết Kế Bifrost Proxy (Unified Production Spec)
 
-*Labels: ready-for-agent, business-accuracy, iceberg-rest-spec, ducklake-catalog*
+*Labels: ready-for-agent, unified-master-spec, iceberg-rest-spec, ducklake-catalog, clean-architecture*
 
 ## Problem Statement
 
-Hiện tại, Bifrost Proxy đã đạt được hiệu năng cao (< 5ms độ trễ) và có cơ chế Worker Queue khống chế RAM, nhưng vẫn còn mang tính chất "giả lập" (mock/simulation) ở nhiều khâu nghiệp vụ cốt lõi:
-1. **Thiếu tính xác thực Iceberg REST Catalog:** Endpoint Commit `POST /v1/namespaces/{ns}/tables/{table}` chưa phân tích sâu danh sách `requirements` (như `assert-table-uuid`, `assert-ref-snapshot-id`, `assert-current-schema-id`) để thực thi Optimistic Concurrency Control (CAS) chuẩn chỉ. Nếu hàng đợi bão hòa, Proxy chưa thiết lập header `Retry-After: 1` cho mã lỗi 429 theo chuẩn HTTP/Iceberg.
-2. **Dữ liệu Delta vào DuckLake bị "bịa đặt" (Simulated Paths):** Lõi `engine/incremental.go` chưa thực sự đọc và phân tích file `metadata.json` cùng các file Avro Manifest từ S3. Thay vào đó, code đang tự sinh các chuỗi đường dẫn mẫu (`snapshot-%d.parquet`) và hardcode danh sách cột (`id`, `data`), khiến dữ liệu trong 14 bảng DuckLake không phản ánh chính xác các file Parquet và schema thực tế do Redpanda sinh ra.
-3. **Chưa đồng nhất Domain Model:** Struct `domain.TableIdentifier` đã được tạo ra nhưng chưa được áp dụng đồng bộ vào các hàm xử lý ở tầng Storage, Postgres và Engine, dẫn đến việc các chuỗi thô `namespace, table string` vẫn trôi nổi khắp codebase.
+Mặc dù Bifrost Proxy đã đạt được các chỉ số hiệu năng ấn tượng (độ trễ p(99) = 4.68ms, thông lượng 2,300+ req/s trên 50 người dùng đồng thời), đợt rà soát mã nguồn chuyên sâu (`/code-review`) đã chỉ ra hệ thống vẫn còn hai cụm vấn đề lớn cần giải quyết triệt để:
 
-Hệ thống cần một bản đặc tả nghiệp vụ chuẩn mực, chính xác 100% theo chuẩn Apache Iceberg REST Catalog và kiến trúc 14 bảng DuckLake, loại bỏ hoàn toàn mọi dạng mock/hardcoded dữ liệu.
+1. **Sai lệch Nghiệp vụ & Dữ liệu Giả lập (Business Inaccuracy):**
+   - **Xác thực Commit lỏng lẻo:** Endpoint `POST /v1/namespaces/{ns}/tables/{table}` chưa phân tích sâu danh sách `requirements` của Iceberg (như `assert-table-uuid`, `assert-ref-snapshot-id`, `assert-current-schema-id`) để thực thi Optimistic Concurrency Control (CAS) chuẩn mực.
+   - **Thiếu chuẩn Backpressure:** Khi hàng đợi bão hòa, Proxy trả về HTTP 429 nhưng thiếu header `Retry-After: 1`, khiến các client như Redpanda Iceberg Sink không biết thời gian lùi bước (back off).
+   - **Dữ liệu Delta vào DuckLake là đường dẫn giả lập:** Lõi `engine/incremental.go` chưa thực sự đọc và phân tích file `metadata.json` cùng các manifest Avro trên S3. Code vẫn đang tự sinh đường dẫn mẫu (`snapshot-%d.parquet`) và hardcode cột (`id`, `data`), khiến 14 bảng DuckLake không phản ánh đúng dữ liệu CDC thật.
+
+2. **Vi phạm Chuẩn Code & Mùi Thiết kế (Standards Violations & Smells):**
+   - **Chưa dùng `TableIdentifier`:** Struct `domain.TableIdentifier` đã được định nghĩa nhưng chưa được đưa vào chữ ký hàm của `StorageService`, `CatalogStore`, và `IngestionQueue`, khiến cặp chuỗi nguyên thủy `(namespace, table string)` vẫn trôi nổi khắp nơi (Primitive Obsession & Data Clumps).
+   - **Cấu hình phân mảnh:** Logic đọc biến môi trường S3/MinIO và fallback bị phân tán giữa `main.go` và `engine/duckdb.go` thay vì tập trung trong package `config`.
+   - **Lặp code & Feature Envy:** Khối xử lý lỗi 404/500 bị copy-paste 2 lần trong GET handler; handler HTTP tự bóc tách map lồng nhau `payload["updates"]` thay vì ủy quyền cho parser chuyên biệt.
+   - **Test chưa đúng kịch bản nghiệp vụ:** Bài test CAS gửi body rỗng thay vì chuỗi pointer lệch; bài test 429 dùng cờ mock thay vì kích hoạt bão hòa buffer thật qua REST API.
+
+Cần một bản đặc tả duy nhất, bao quát toàn diện để đưa Bifrost Proxy đạt chuẩn xác nghiệp vụ 100% và tuân thủ tuyệt đối các chuẩn thiết kế Clean Architecture.
 
 ---
 
 ## Solution
 
-Chuyển đổi toàn diện Bifrost Proxy từ cơ chế "mô phỏng" sang **"Bộ xử lý nghiệp vụ chính xác tuyệt đối" (Production-Grade Business Engine)**:
+Tái cơ cấu hệ thống thành một khối thống nhất dựa trên 3 trụ cột:
 
-1. **Chuẩn hóa Giao thức Iceberg REST Commit (Phía Ghi - Đồng bộ < 15ms):**
-   - Đọc payload `UpdateTableRequest`:
-     - Trích xuất `requirements`: kiểm tra `assert-table-uuid`, `assert-current-schema-id`, `assert-ref-snapshot-id`. Nếu điều kiện không khớp với trạng thái hiện tại trong PostgreSQL, trả về `HTTP 409 Conflict` (CommitFailedException).
-     - Trích xuất `updates`: lấy `current-snapshot-id`, `schema` mới, và `metadata-location`.
-   - Cập nhật con trỏ bảng vào PostgreSQL bằng giao dịch nguyên tử (Atomic CAS Transaction).
-   - Nếu hàng đợi `IngestionQueue` đầy, trả về `HTTP 429 Too Many Requests` đính kèm header `Retry-After: 1`.
-   - Trả lời `200 OK` cho Redpanda ngay sau khi Postgres chốt sổ thành công.
+1. **Trụ cột Nghiệp vụ: Chuẩn hóa Giao thức Iceberg REST & CAS:**
+   - Ủy quyền việc bóc tách payload cho typed parser `domain.UpdateTableRequest`: trích xuất danh sách `Requirements` và `Updates`.
+   - Kiểm tra CAS chặt chẽ: so sánh `assert-ref-snapshot-id` và `assert-table-uuid` với bản ghi trong PostgreSQL. Nếu sai lệch, trả về ngay `HTTP 409 Conflict` (CommitFailedException).
+   - Khi `IngestionQueue` đầy, trả về `HTTP 429 Too Many Requests` đính kèm bắt buộc header `Retry-After: 1`.
+   - Endpoint `GET` lấy đúng con trỏ từ Postgres và dùng con trỏ đó để đọc nội dung file metadata từ MinIO.
 
-2. **Hiện thực hóa Bóc tách Delta Thực tế từ Iceberg sang DuckLake (Phía Sync - Bất đồng bộ):**
-   - Background Worker nhận `CommitTask` chứa `domain.TableIdentifier` và `MetadataLocation`.
-   - Worker tải file `metadata.json` từ S3 MinIO và phân tích cú pháp:
-     - Lấy đúng `snapshot-id` vừa commit và file `manifest-list` tương ứng.
-     - Đọc danh sách các manifest mới được thêm trong snapshot (`added_data_files`).
-     - Đọc nội dung file manifest để rút trích danh sách file Parquet thực tế (`file_path`, `record_count`, `file_size_in_bytes`, `partition`).
-   - Ghi dữ liệu THẬT vào 14 bảng DuckLake:
-     - `ducklake_snapshot`: snapshot_id thật, timestamp thật, schema_version thật.
-     - `ducklake_data_file`: đường dẫn Parquet thật, số dòng thật, dung lượng file thật.
-     - `ducklake_delete_file`: nếu manifest chứa file delete (`content = 1`), lấy field `2147483546` để liên kết chính xác `referenced_data_file_id`.
-     - `ducklake_column`: ánh xạ danh sách cột và kiểu dữ liệu thật từ Iceberg schema sang DuckLake column versioning (`start_snapshot`, `end_snapshot`).
-     - `ducklake_snapshot_changes`: ghi nhận sự kiện delta thật.
+2. **Trụ cột Đồng bộ: Bóc tách Delta Thực tế sang DuckLake:**
+   - Kết nối trực tiếp hàm `ParseMetadataJSON` vào luồng sync của Background Worker.
+   - Worker tải file `metadata.json` thật từ MinIO, đọc snapshot hiện tại và manifest list:
+     - Trích xuất danh sách file Parquet thật do Redpanda ghi xuống để nạp vào `ducklake_data_file`.
+     - Phân tích file delete (`content = 1`), bóc field `2147483546` để liên kết `referenced_data_file_id` vào `ducklake_delete_file`.
+     - Trích xuất danh sách cột và kiểu dữ liệu thật từ Iceberg schema để nạp vào `ducklake_column` (`start_snapshot`, `end_snapshot`).
+     - Ghi nhận nhật ký delta vào `ducklake_snapshot` và `ducklake_snapshot_changes`.
+   - Triệt tiêu 100% các chuỗi đường dẫn tự bịa và cột hardcode.
 
-3. **Tái cấu trúc Mã nguồn theo Chuẩn Clean Architecture:**
-   - Sử dụng `domain.TableIdentifier` xuyên suốt mọi chữ ký hàm của Storage, Catalog Store, và Queue.
-   - Đóng gói toàn bộ cấu hình vào package `config` duy nhất.
+3. **Trụ cột Kiến trúc & Chuẩn Code:**
+   - Áp dụng `domain.TableIdentifier` thay thế toàn bộ tham số chuỗi rời rạc ở mọi interface (`StorageService`, `CatalogStore`, `QueueService`).
+   - Tạo package `config/config.go` quản lý tập trung toàn bộ biến môi trường S3, MinIO, và PostgreSQL với giá trị mặc định chuẩn xác.
+   - Tinh gọn handler HTTP: dùng hàm tiện ích trả lỗi 404/500 dùng chung, loại bỏ duplicated code.
+   - Chuẩn hóa test suite: test CAS bằng chuỗi pointer lệch thật, test 429 bằng cách gửi đồng thời vượt dung lượng buffer hàng đợi thật qua REST API.
 
 ---
 
 ## User Stories
 
-1. As a Redpanda Iceberg Sink writer, I want the proxy commit endpoint to validate `assert-ref-snapshot-id` and `assert-table-uuid` against PostgreSQL, so that conflicting concurrent commits from multiple workers are safely rejected with HTTP 409 without corrupting table state.
+1. As a Redpanda Iceberg Sink writer, I want the commit endpoint to validate `assert-ref-snapshot-id` and `assert-table-uuid` against PostgreSQL, so that conflicting concurrent commits from multiple workers are safely rejected with HTTP 409 without corrupting table state.
 2. As a Redpanda Iceberg Sink writer, I want to receive an HTTP 429 Too Many Requests response with a `Retry-After: 1` header when the internal ingestion queue is saturated, so that the sink pauses and retries cleanly without losing streaming messages.
 3. As a Data Platform operator, I want the commit endpoint to record and persist the exact `metadata-location` provided by Redpanda in PostgreSQL within 2ms, so that the catalog pointer is immediately committed before acknowledging the HTTP request.
 4. As a Trino/Spark/Superset query engine, I want the `GET /v1/namespaces/{ns}/tables/{table}` endpoint to look up the table pointer in PostgreSQL and stream the exact metadata JSON file from MinIO, so that read queries always see the latest committed snapshot.
@@ -54,16 +58,39 @@ Chuyển đổi toàn diện Bifrost Proxy từ cơ chế "mô phỏng" sang **"
 6. As an Analytics Engineer querying CDC updates and deletes, I want Iceberg position delete files (`content = 1`) to be inspected for field `2147483546` and mapped to `ducklake_delete_file` linked to the correct `data_file_id`, so that row deletions made in Postgres CDC are accurately reflected in DuckLake query results.
 7. As a Data Engineer evolving table schemas, I want columns added via `ALTER TABLE` to be extracted from Iceberg schema updates and recorded in `ducklake_column` with their actual field IDs, types, and `start_snapshot`, so that schema evolution is preserved seamlessly in DuckLake.
 8. As a Core Developer, I want all storage, database, and queue signatures to accept a strongly-typed `domain.TableIdentifier`, so that primitive obsession code smells are completely eliminated.
-9. As a DevOps Engineer, I want all S3 and PostgreSQL environment variables and fallback defaults to be centralized in a dedicated `config` package, so that configuration parsing is never duplicated across modules.
-10. As a QA Engineer, I want all tests to interact strictly with the HTTP REST API boundary and assert business responses without inspecting private in-memory maps, so that tests remain robust against internal refactoring.
-11. As a Performance Engineer, I want K6 load test scripts to benchmark 50 concurrent virtual users submitting realistic write commit payloads, so that we rigorously prove the system maintains a tail latency p(99) < 15ms under heavy concurrent write loads.
+9. As a Developer, I want all S3 and PostgreSQL environment variables and fallback defaults to be centralized in a dedicated `config` package, so that configuration parsing is never duplicated across modules.
+10. As a Core Developer, I want HTTP error responses in `api/catalog.go` to use centralized helper functions, so that repetitive error boilerplate is eliminated.
+11. As a Core Developer, I want commit payload parsing to be encapsulated in a typed parser struct in `domain`, eliminating feature envy and map-traversal code smells in the HTTP handler.
+12. As a QA Engineer, I want integration tests to test CAS conflict with an actual mismatched pointer string, and backpressure by saturating the actual channel buffer with concurrent requests, ensuring 100% adherence to the single HTTP REST test seam.
+13. As a Performance Engineer, I want K6 load test scripts to benchmark 50 concurrent virtual users submitting realistic write commit payloads, ensuring the system maintains a tail latency p(99) < 15ms under heavy concurrent write loads.
 
 ---
 
 ## Implementation Decisions
 
-### 1. Phân tích Yêu cầu Concurrency (CAS Validation in REST API)
-- Khi nhận `POST /v1/namespaces/:namespace/tables/:table`, body JSON chứa struct `UpdateTableRequest`:
+### 1. Domain Modeling: `TableIdentifier` & Typed Request Parsers
+- Định nghĩa trong `domain/model.go`:
+  ```go
+  type TableIdentifier struct {
+      Namespace string `json:"namespace"`
+      Table     string `json:"table"`
+  }
+  ```
+- Cập nhật mọi interface trong hệ thống:
+  - `storage.StorageService`:
+    - `GetTableMetadata(ctx context.Context, id domain.TableIdentifier) ([]byte, error)`
+    - `GetMetadataByLocation(ctx context.Context, location string) ([]byte, error)`
+    - `SaveTableMetadata(ctx context.Context, id domain.TableIdentifier, data []byte) error`
+  - `storage.CatalogStore`:
+    - `GetTablePointer(ctx context.Context, id domain.TableIdentifier) (string, error)`
+    - `SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error`
+  - `engine.CommitTask`:
+    - `Table domain.TableIdentifier`
+    - `MetadataLocation string`
+    - `SnapshotID int64`
+
+### 2. Typed Iceberg Commit Parser (`domain/iceberg.go`)
+- Tạo parser tách biệt khỏi HTTP layer:
   ```go
   type UpdateTableRequest struct {
       Requirements []TableRequirement `json:"requirements"`
@@ -71,60 +98,39 @@ Chuyển đổi toàn diện Bifrost Proxy từ cơ chế "mô phỏng" sang **"
   }
 
   type TableRequirement struct {
-      Type        string `json:"type"` // e.g. "assert-table-uuid", "assert-ref-snapshot-id"
+      Type        string `json:"type"` // "assert-table-uuid", "assert-ref-snapshot-id", etc.
       UUID        string `json:"uuid,omitempty"`
       Ref         string `json:"ref,omitempty"`
       SnapshotID  int64  `json:"snapshot-id,omitempty"`
   }
-  ```
-- Proxy đối chiếu các điều kiện trong `Requirements` với bản ghi hiện tại trong PostgreSQL. Nếu có bất kỳ điều kiện nào sai lệch:
-  - Trả về ngay `HTTP 409 Conflict`:
-    ```json
-    {
-      "error": {
-        "message": "Requirement failed: snapshot-id does not match current table state",
-        "type": "CommitFailedException",
-        "code": 409
-      }
-    }
-    ```
 
-### 2. Header `Retry-After` trên Mã 429
+  type TableUpdate struct {
+      Action           string `json:"action"` // "set-current-snapshot", "add-snapshot", etc.
+      SnapshotID       int64  `json:"snapshot-id,omitempty"`
+      MetadataLocation string `json:"metadata-location,omitempty"`
+  }
+  ```
+- Handler `api/catalog.go` chỉ cần gọi `req, err := domain.ParseUpdateTableRequest(c.Body())`, loại bỏ hoàn toàn việc duyệt map thủ công.
+
+### 3. Chuẩn hóa Header `Retry-After: 1` và Error Helpers trong API
 - Khi `queue.Submit(task)` trả về `false`:
   ```go
   c.Set("Retry-After", "1")
-  return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-      "error": fiber.Map{
-          "message": "Ingestion queue is saturated. Please retry with exponential backoff.",
-          "type":    "QueueSaturatedException",
-          "code":    429,
-      },
-  })
+  return writeError(c, fiber.StatusTooManyRequests, "QueueSaturatedException", "Ingestion queue is saturated. Please retry with backoff.")
+  ```
+- Tạo helper `writeError(c *fiber.Ctx, status int, errorType, message string) error` để thống nhất cấu trúc JSON lỗi chuẩn Iceberg:
+  ```json
+  {
+    "error": {
+      "message": "<message>",
+      "type": "<errorType>",
+      "code": <status>
+    }
+  }
   ```
 
-### 3. Chuẩn hóa Domain Model (`domain.TableIdentifier`)
-- Mọi hàm trong `storage`, `postgres`, `engine` đều nhận `domain.TableIdentifier`:
-  ```go
-  GetTablePointer(ctx context.Context, id domain.TableIdentifier) (string, error)
-  SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error
-  GetMetadataByLocation(ctx context.Context, location string) ([]byte, error)
-  ```
-
-### 4. Bóc tách Delta Thực tế từ Iceberg sang DuckLake
-- Worker tải `metadata.json` thật từ S3 qua `StorageService.GetMetadataByLocation`:
-  - Giải mã `IcebergMetadata` struct.
-  - Tìm snapshot có ID bằng `CurrentSnapshotID`.
-  - Trích xuất danh sách schema fields từ `Schemas`.
-- Đối với danh sách file Parquet:
-  - Sử dụng DuckDB để truy vấn metadata Iceberg hoặc đọc file manifest:
-    `SELECT file_path, file_format, record_count, file_size_in_bytes, content FROM read_parquet('s3://...')` hoặc từ metadata Iceberg manifest.
-  - Chèn từng file Parquet THẬT vào `ducklake_catalog.ducklake_data_file`.
-  - Chèn từng file Delete THẬT vào `ducklake_catalog.ducklake_delete_file`.
-  - Cập nhật đúng các cột THẬT vào `ducklake_catalog.ducklake_column`.
-- **Tuyệt đối cấm:** Việc tự sinh chuỗi `snapshot-%d.parquet` hay hardcode `id`, `data`.
-
-### 5. Package Cấu hình Tập trung (`config`)
-- Tạo package `config/config.go` quản lý toàn bộ biến môi trường:
+### 4. Package Cấu hình Tập trung (`config/config.go`)
+- Tạo package `config`:
   ```go
   type Config struct {
       S3Endpoint        string
@@ -133,26 +139,43 @@ Chuyển đổi toàn diện Bifrost Proxy từ cơ chế "mô phỏng" sang **"
       S3Bucket          string
       PGConnString      string
   }
+
+  func LoadConfig() *Config
   ```
-  Cả `main.go` và `engine/duckdb.go` đều nhận cấu hình từ struct này.
+- Cả `main.go` và `engine/duckdb.go` đều dùng `config.LoadConfig()`, thống nhất default `minio:9000` và `postgres:5432/polaris`.
+
+### 5. Hiện thực hóa Delta Manifest Parser & DuckLake Inserts
+- Kết nối `ParseMetadataJSON` vào `SyncDeltaIncremental`:
+  - Đọc file `metadata.json` qua `StorageService.GetMetadataByLocation`.
+  - Phân tích danh sách `Snapshots`: lấy đúng snapshot vừa commit.
+  - Phân tích danh sách schema fields thật để cập nhật vào `ducklake_catalog.ducklake_column`.
+  - Phân tích manifest để lấy danh sách file Parquet thật nạp vào `ducklake_catalog.ducklake_data_file`.
+  - Nếu gặp position delete (`content = 1`), bóc field `2147483546` để nạp vào `ducklake_catalog.ducklake_delete_file`.
+- Xóa bỏ triệt để các chuỗi tự sinh `snapshot-%d.parquet`.
 
 ---
 
 ## Testing Decisions
 
-- **Blackbox HTTP Contract Testing:**
-  - Kiểm tra Commit thành công trả về HTTP 200 kèm `metadata-location`.
-  - Kiểm tra Commit thất bại khi gửi `assert-ref-snapshot-id` sai trả về HTTP 409.
-  - Kiểm tra Commit khi queue bão hòa trả về HTTP 429 kèm header `Retry-After: 1`.
-  - Kiểm tra `GET /tables/{table}` trả về đúng nội dung file JSON được trỏ bởi Postgres.
-- **DuckLake Metadata Verification:**
-  - Sau khi commit thành công, truy vấn `ducklake_catalog.ducklake_data_file` qua DuckDB: xác nhận các dòng dữ liệu chứa đường dẫn Parquet thật và số record thật.
+- **Single Test Seam (HTTP REST Boundary):**
+  - Mọi bài test gửi HTTP request qua Fiber app test runner, kiểm tra HTTP status, headers và JSON response.
+- **Xác thực Lỗi CAS Chuẩn:**
+  - Gửi Commit A với previous pointer hợp lệ -> 200 OK.
+  - Gửi Commit B với `previous-metadata-location` sai lệch hoặc requirement snapshot ID không khớp -> Nhận chính xác `409 Conflict`.
+- **Xác thực Backpressure Chuẩn:**
+  - Khởi tạo queue với buffer nhỏ (ví dụ 1), gửi đồng thời các request vượt ngưỡng buffer -> Xác nhận nhận về `429 Too Many Requests` và header `Retry-After: 1`.
 - **K6 Load Benchmark:**
-  - Chạy kịch bản 50 VUs với cả HTTP GET và POST commit thật để xác nhận tail latency p(99) < 15ms.
+  - 50 Virtual Users gửi commit `POST` đồng thời trong 15s. Xác nhận thông lượng > 2,000 req/s và p(99) < 15ms.
 
 ---
 
 ## Out of Scope
 
 - Tự động gom file Parquet nhỏ (Compaction worker).
-- Tích hợp xác thực OAuth token phức tạp với Identity Provider bên thứ ba (Keycloak/Okta).
+- Tích hợp xác thực OAuth token phức tạp với IdP bên thứ ba (Keycloak/Okta).
+
+---
+
+## Further Notes
+
+Bản đặc tả này thay thế và hợp nhất toàn bộ các tài liệu spec trước đó (`SPEC.md`, `SPEC_SyncToDuckLake.md`, `SPEC_Fixes_and_Hardening.md`), trở thành nguồn chân lý (Source of Truth) duy nhất cho dự án Bifrost Proxy.
