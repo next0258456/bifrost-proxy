@@ -167,9 +167,9 @@ func TestSyncDeltaIncrementalDirectExecution(t *testing.T) {
 		CREATE SCHEMA IF NOT EXISTS ducklake_catalog;
 		CREATE TABLE ducklake_catalog.ducklake_table (table_id BIGINT, table_name VARCHAR);
 		CREATE TABLE ducklake_catalog.ducklake_snapshot (snapshot_id BIGINT, snapshot_time VARCHAR, schema_version INT, next_catalog_id INT, next_file_id INT);
-		CREATE TABLE ducklake_catalog.ducklake_data_file (data_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, path VARCHAR, record_count BIGINT, file_size_in_bytes BIGINT, partition_id INT);
-		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, record_count BIGINT, file_size_in_bytes BIGINT);
-		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_data_file (data_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, partition_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
+		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
 		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, operation VARCHAR, c3 VARCHAR, c4 VARCHAR, c5 VARCHAR);
 		INSERT INTO ducklake_catalog.ducklake_table VALUES (1, 'sales');
 	`)
@@ -234,7 +234,7 @@ func TestSyncDeltaIncrementalDirectExecution(t *testing.T) {
 	// Verify Data File was inserted with real path and stats
 	var dfPath string
 	var dfRecords, dfBytes int64
-	err = db.QueryRow("SELECT path, record_count, file_size_in_bytes FROM ducklake_catalog.ducklake_data_file WHERE data_file_id = 1;").Scan(&dfPath, &dfRecords, &dfBytes)
+	err = db.QueryRow("SELECT path, record_count, file_size_bytes FROM ducklake_catalog.ducklake_data_file WHERE data_file_id = 1;").Scan(&dfPath, &dfRecords, &dfBytes)
 	require.NoError(t, err)
 	assert.Equal(t, "s3://lakehouse/data/part-01.parquet", dfPath)
 	assert.Equal(t, int64(100), dfRecords)

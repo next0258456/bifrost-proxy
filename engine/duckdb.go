@@ -28,9 +28,10 @@ func NewSyncEngine(cfg *config.Config, store storage.StorageService) (*SyncEngin
 	db.Exec("PRAGMA memory_limit = '250MB';")
 	db.Exec("PRAGMA preserve_insertion_order = false;")
 
-	// Load extensions cần thiết để parse Avro và Iceberg tree
+	// Load extensions cần thiết để parse Avro, Iceberg tree và kết nối PostgreSQL Catalog
 	db.Exec("INSTALL httpfs; LOAD httpfs;")
 	db.Exec("INSTALL iceberg; LOAD iceberg;")
+	db.Exec("INSTALL postgres; LOAD postgres;")
 	db.Exec("INSTALL ducklake; LOAD ducklake;")
 
 	// Khởi tạo Secret S3 để đọc file Avro/Parquet và metadata JSON
@@ -51,10 +52,16 @@ func NewSyncEngine(cfg *config.Config, store storage.StorageService) (*SyncEngin
 		log.Printf("Warning: failed to create S3 secret: %v", err)
 	}
 
-	// Tạo schema và attach DuckLake Catalog để xuất file .ducklake
-	_, err = db.Exec("ATTACH 's3://lakehouse/bifrost_catalog' AS ducklake_catalog (TYPE DUCKLAKE);")
+	// Đính kèm trực tiếp DuckLake Catalog vào PostgreSQL làm single source of truth cho metadata!
+	// Cú pháp: ATTACH 'ducklake:postgres:...' AS ducklake_catalog
+	pgCatalogSQL := fmt.Sprintf(
+		"ATTACH 'dbname=polaris host=postgres port=5432 user=admin password=password' AS ducklake_catalog (TYPE POSTGRES);",
+	)
+	_, err = db.Exec(pgCatalogSQL)
 	if err != nil {
-		log.Printf("Warning: failed to attach ducklake catalog: %v", err)
+		log.Printf("Warning: failed to attach PostgreSQL as ducklake_catalog: %v", err)
+	} else {
+		log.Println("DuckDB SyncEngine successfully attached PostgreSQL as ducklake_catalog!")
 	}
 
 	return &SyncEngine{db: db, store: store}, nil

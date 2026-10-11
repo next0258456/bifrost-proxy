@@ -145,36 +145,40 @@ def test_e2e_write_pyiceberg_read_ducklake():
         print(f"    [Iceberg] Order #{row[0]}: {row[1]} | Price: ${row[2]}")
     iceberg_conn.close()
 
-    # 4.2. Query Path 2: PURE NATIVE DUCKLAKE (ATTACH ducklake & direct table query, NO iceberg_scan)
-    ducklake_cat_path = os.path.join(temp_dir, "e2e_ducklake.ducklake").replace("\\", "/")
-    print(f"\n  [4.2] Query Path 2: Pure Native DuckLake (`ATTACH ducklake:{ducklake_cat_path}`):")
-    print("        -> Registering parquet data files into DuckLake catalog metadata...")
-
-    writer = duckdb.connect()
-    writer.execute("INSTALL ducklake; LOAD ducklake;")
-    writer.execute(f"ATTACH 'ducklake:{ducklake_cat_path}' AS e2e_lake;")
-    writer.execute(f"CREATE TABLE e2e_lake.{table_name} (order_id BIGINT, customer_name VARCHAR, amount DOUBLE);")
-    
-    # Download parquet files locally for Windows ducklake filesystem bridge if needed,
-    # or register data files directly into DuckLake
-    local_parquet_dir = os.path.join(temp_dir, "data").replace("\\", "/")
-    os.makedirs(local_parquet_dir, exist_ok=True)
-    local_parquet_file = os.path.join(local_parquet_dir, "orders.parquet").replace("\\", "/")
-    pa.parquet.write_table(records, local_parquet_file)
-
-    writer.execute(f"CALL ducklake_add_data_files('e2e_lake', '{table_name}', '{local_parquet_file}');")
-    writer.close()
-    del writer
+    # 4.2. Query Path 2: PURE NATIVE DUCKLAKE (ATTACH ducklake:postgres & direct table query, NO iceberg_scan)
+    print(f"\n  [4.2] Query Path 2: Pure Native DuckLake (`ATTACH ducklake:postgres...`):")
+    print("        -> Reading DuckLake metadata directly streamed into PostgreSQL by Bifrost Proxy...")
 
     # Dedicated PURE DuckLake Reader connection:
-    # Completely independent reader without any Iceberg extension or scan function!
+    # Completely independent reader querying DuckLake catalog directly via PostgreSQL!
     pure_ducklake_reader = duckdb.connect()
     pure_ducklake_reader.execute("INSTALL ducklake; LOAD ducklake;")
-    pure_ducklake_reader.execute(f"ATTACH 'ducklake:{ducklake_cat_path}' AS e2e_lake (READ_ONLY);")
+    pure_ducklake_reader.execute("INSTALL postgres; LOAD postgres;")
+    pure_ducklake_reader.execute("INSTALL httpfs; LOAD httpfs;")
+    pure_ducklake_reader.execute(f"""
+        CREATE SECRET s3_e2e_ducklake (
+            TYPE S3,
+            KEY_ID '{S3_ACCESS_KEY}',
+            SECRET '{S3_SECRET_KEY}',
+            REGION 'us-east-1',
+            ENDPOINT 'localhost:9000',
+            URL_STYLE 'path',
+            USE_SSL 'false'
+        );
+    """)
 
-    print(f"        -> Executing pure SQL: SELECT * FROM e2e_lake.{table_name};")
+    # Give asynchronous ingestion queue worker a moment to finalize delta execution
+    time.sleep(1.0)
+
+    # Attach DuckLake from Postgres backend!
+    pure_ducklake_reader.execute(f"""
+        ATTACH 'ducklake:postgres:dbname=polaris host=localhost port=5432 user=admin password=password' 
+        AS prod_lake (DATA_PATH 's3://lakehouse/{namespace}/', OVERRIDE_DATA_PATH true);
+    """)
+
+    print(f"        -> Executing pure SQL: SELECT * FROM prod_lake.{table_name};")
     ducklake_rows = pure_ducklake_reader.execute(
-        f"SELECT order_id, customer_name, amount FROM e2e_lake.{table_name} ORDER BY order_id;"
+        f"SELECT order_id, customer_name, amount FROM prod_lake.{table_name} ORDER BY order_id;"
     ).fetchall()
     for row in ducklake_rows:
         print(f"    [DuckLake] Order #{row[0]}: {row[1]} | Price: ${row[2]}")
