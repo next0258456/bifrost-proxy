@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"bifrost-proxy/api"
@@ -15,133 +16,151 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// MockStorage simulates S3 Storage
-type MockStorage struct {
-	Tables map[string][]byte
+// fakeStorage is an in-memory object store keyed by metadata location.
+type fakeStorage struct {
+	files map[string][]byte
 }
 
-func (m *MockStorage) GetTableMetadata(ctx context.Context, id domain.TableIdentifier) ([]byte, error) {
-	key := id.Namespace + "/" + id.Table
-	data, ok := m.Tables[key]
+func (m *fakeStorage) GetTableMetadata(ctx context.Context, id domain.TableIdentifier) ([]byte, error) {
+	return nil, storage.ErrTableNotFound
+}
+
+func (m *fakeStorage) GetMetadataByLocation(ctx context.Context, location string) ([]byte, error) {
+	data, ok := m.files[location]
 	if !ok {
 		return nil, storage.ErrTableNotFound
 	}
 	return data, nil
 }
 
-func (m *MockStorage) GetMetadataByLocation(ctx context.Context, location string) ([]byte, error) {
-	data, ok := m.Tables[location]
-	if !ok {
-		return nil, storage.ErrTableNotFound
-	}
-	return data, nil
-}
-
-func (m *MockStorage) SaveTableMetadata(ctx context.Context, id domain.TableIdentifier, data []byte) error {
-	key := id.Namespace + "/" + id.Table
-	m.Tables[key] = data
+func (m *fakeStorage) SaveTableMetadata(ctx context.Context, id domain.TableIdentifier, data []byte) error {
 	return nil
 }
 
-// MockCatalogStore simulates PostgreSQL Catalog Store (Sync-01)
-type MockCatalogStore struct {
-	Pointers map[string]string
+// fakeCatalog is an in-memory catalog pointer store honouring CAS semantics.
+type fakeCatalog struct {
+	pointers map[string]string
 }
 
-func (m *MockCatalogStore) GetTablePointer(ctx context.Context, id domain.TableIdentifier) (string, error) {
-	key := id.Namespace + "/" + id.Table
-	ptr, ok := m.Pointers[key]
+func (m *fakeCatalog) GetTablePointer(ctx context.Context, id domain.TableIdentifier) (string, error) {
+	ptr, ok := m.pointers[id.String()]
 	if !ok {
 		return "", storage.ErrTableNotFound
 	}
 	return ptr, nil
 }
 
-func (m *MockCatalogStore) SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error {
-	key := id.Namespace + "/" + id.Table
-	curr, exists := m.Pointers[key]
-	if previousLocation == "" {
-		if exists {
-			return storage.ErrCommitConflict
-		}
-		m.Pointers[key] = metadataLocation
-		return nil
-	}
-	if curr != previousLocation {
+func (m *fakeCatalog) SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error {
+	curr, exists := m.pointers[id.String()]
+	if previousLocation == "" && exists {
 		return storage.ErrCommitConflict
 	}
-	m.Pointers[key] = metadataLocation
+	if previousLocation != "" && curr != previousLocation {
+		return storage.ErrCommitConflict
+	}
+	m.pointers[id.String()] = metadataLocation
 	return nil
 }
 
-func (m *MockCatalogStore) Close() {}
+func (m *fakeCatalog) Close() {}
+
+// recordingQueue captures submitted tasks and can simulate saturation.
+type recordingQueue struct {
+	full  bool
+	tasks []engine.CommitTask
+}
+
+func (q *recordingQueue) Submit(task engine.CommitTask) bool {
+	if q.full {
+		return false
+	}
+	q.tasks = append(q.tasks, task)
+	return true
+}
+
+func (q *recordingQueue) Stop() {}
+
+func newApp(files map[string][]byte, pointers map[string]string, queue engine.QueueService) *fiber.App {
+	app := fiber.New()
+	api.SetupCatalogRoutes(app, &fakeStorage{files: files}, &fakeCatalog{pointers: pointers}, queue)
+	return app
+}
+
+func post(app *fiber.App, path, body string) (int, string, map[string]string) {
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ := app.Test(req, -1)
+	b, _ := io.ReadAll(resp.Body)
+	headers := map[string]string{"Retry-After": resp.Header.Get("Retry-After")}
+	return resp.StatusCode, string(b), headers
+}
 
 func TestCatalogRead(t *testing.T) {
-	app := fiber.New()
-	store := &MockStorage{
-		Tables: map[string][]byte{
-			"s3://lakehouse/default/test_table/metadata/v1.json": []byte(`{"format-version": 2, "table-uuid": "uuid-123"}`),
-		},
-	}
-	catStore := &MockCatalogStore{
-		Pointers: map[string]string{
-			"default/test_table": "s3://lakehouse/default/test_table/metadata/v1.json",
-		},
-	}
-	api.SetupCatalogRoutes(app, store, catStore, nil)
+	app := newApp(
+		map[string][]byte{"s3://lakehouse/default/t/metadata/v1.json": []byte(`{"format-version": 2, "table-uuid": "uuid-123"}`)},
+		map[string]string{"default.t": "s3://lakehouse/default/t/metadata/v1.json"},
+		&recordingQueue{},
+	)
 
-	// Test 1: Table exists
-	req := httptest.NewRequest("GET", "/v1/namespaces/default/tables/test_table", nil)
-	resp, _ := app.Test(req, -1)
-	assert.Equal(t, 200, resp.StatusCode)
-	
+	resp, _ := app.Test(httptest.NewRequest("GET", "/v1/namespaces/default/tables/t", nil), -1)
 	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, 200, resp.StatusCode)
 	assert.Contains(t, string(body), "uuid-123")
 
-	// Test 2: Table does not exist in Postgres Catalog (404)
-	req404 := httptest.NewRequest("GET", "/v1/namespaces/default/tables/not_found", nil)
-	resp404, _ := app.Test(req404, -1)
-	assert.Equal(t, 404, resp404.StatusCode)
-	
+	resp404, _ := app.Test(httptest.NewRequest("GET", "/v1/namespaces/default/tables/missing", nil), -1)
 	body404, _ := io.ReadAll(resp404.Body)
+	assert.Equal(t, 404, resp404.StatusCode)
 	assert.Contains(t, string(body404), "NoSuchTableException")
 }
 
-func TestCatalogCommit(t *testing.T) {
-	app := fiber.New()
-	store := &MockStorage{Tables: map[string][]byte{}}
-	catStore := &MockCatalogStore{Pointers: map[string]string{}}
-	queue := engine.NewIngestionQueue(nil, 100)
-	defer queue.Stop()
+func TestCatalogCommitSuccessPropagatesRealSnapshotID(t *testing.T) {
+	q := &recordingQueue{}
+	app := newApp(nil, map[string]string{}, q)
 
-	api.SetupCatalogRoutes(app, store, catStore, queue)
+	status, body, _ := post(app, "/v1/namespaces/bronze/tables/fmcg_sales", `{
+		"updates": [{"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 4242}],
+		"metadata-location": "s3://lakehouse/bronze/fmcg_sales/metadata/v1.json"
+	}`)
 
-	// 1. Commit ban đầu (tạo mới) -> 200 OK
-	req := httptest.NewRequest("POST", "/v1/namespaces/default/tables/test_table", nil)
-	resp, _ := app.Test(req, -1)
-	body, _ := io.ReadAll(resp.Body)
-	assert.Contains(t, string(body), "metadata-location")
-
-	// 2. Commit tiếp theo nhưng gửi previous location rỗng khi bảng đã tồn tại -> 409 Conflict
-	reqConflict := httptest.NewRequest("POST", "/v1/namespaces/default/tables/test_table", nil)
-	respConflict, _ := app.Test(reqConflict, -1)
-	assert.Equal(t, 409, respConflict.StatusCode)
-
-	// 3. Queue bão hòa -> 429 Too Many Requests
-	saturatedQueue := &MockQueue{Full: true}
-	appSaturated := fiber.New()
-	api.SetupCatalogRoutes(appSaturated, store, &MockCatalogStore{Pointers: map[string]string{}}, saturatedQueue)
-	req429 := httptest.NewRequest("POST", "/v1/namespaces/default/tables/overflow_table", nil)
-	resp429, _ := appSaturated.Test(req429, -1)
-	assert.Equal(t, 429, resp429.StatusCode)
+	assert.Equal(t, 200, status)
+	assert.Contains(t, body, "s3://lakehouse/bronze/fmcg_sales/metadata/v1.json")
+	if assert.Len(t, q.tasks, 1) {
+		assert.Equal(t, int64(4242), q.tasks[0].SnapshotID)
+		assert.Equal(t, "bronze.fmcg_sales", q.tasks[0].Table.String())
+	}
 }
 
-type MockQueue struct {
-	Full bool
+func TestCatalogCommitConflictOnStalePreviousPointer(t *testing.T) {
+	app := newApp(nil, map[string]string{}, &recordingQueue{})
+	path := "/v1/namespaces/default/tables/t"
+
+	status, _, _ := post(app, path, `{"metadata-location": "s3://b/v1.json"}`)
+	assert.Equal(t, 200, status)
+
+	status, body, _ := post(app, path, `{"metadata-location": "s3://b/v2.json", "previous-metadata-location": "s3://b/STALE.json"}`)
+	assert.Equal(t, 409, status)
+	assert.Contains(t, body, "CommitFailedException")
+
+	status, _, _ = post(app, path, `{"metadata-location": "s3://b/v2.json", "previous-metadata-location": "s3://b/v1.json"}`)
+	assert.Equal(t, 200, status)
 }
 
-func (m *MockQueue) Submit(task engine.CommitTask) bool {
-	return !m.Full
+func TestCatalogCommitRejectsBadPayload(t *testing.T) {
+	app := newApp(nil, map[string]string{}, &recordingQueue{})
+
+	status, body, _ := post(app, "/v1/namespaces/default/tables/t", `{not json`)
+	assert.Equal(t, 400, status)
+	assert.Contains(t, body, "BadRequestException")
+
+	status, _, _ = post(app, "/v1/namespaces/default/tables/t", `{}`)
+	assert.Equal(t, 400, status)
 }
 
-func (m *MockQueue) Stop() {}
+func TestCatalogCommitSaturatedQueueReturns429WithRetryAfter(t *testing.T) {
+	app := newApp(nil, map[string]string{}, &recordingQueue{full: true})
+
+	status, body, headers := post(app, "/v1/namespaces/default/tables/t", `{"metadata-location": "s3://b/v1.json"}`)
+	assert.Equal(t, 429, status)
+	assert.Equal(t, "1", headers["Retry-After"])
+	assert.Contains(t, body, "QueueSaturatedException")
+}

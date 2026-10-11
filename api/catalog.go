@@ -8,132 +8,67 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+// writeError renders the Iceberg REST error envelope.
+func writeError(c *fiber.Ctx, status int, errorType, message string) error {
+	return c.Status(status).JSON(fiber.Map{
+		"error": fiber.Map{
+			"message": message,
+			"type":    errorType,
+			"code":    status,
+		},
+	})
+}
+
 func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogStore storage.CatalogStore, queue engine.QueueService) {
-	// Ticket 02 & Sync-01: Catalog Read API
+	// Load table: resolve the pointer in the catalog store, then stream that exact metadata file.
 	app.Get("/v1/namespaces/:namespace/tables/:table", func(c *fiber.Ctx) error {
 		id := domain.NewTableIdentifier(c.Params("namespace"), c.Params("table"))
 
-		// 1. Kiểm tra con trỏ bảng trong PostgreSQL trước (nếu có catalogStore)
-		var metadataPath string
-		if catalogStore != nil {
-			var err error
-			metadataPath, err = catalogStore.GetTablePointer(c.Context(), id)
-			if err != nil {
-				if err == storage.ErrTableNotFound {
-					return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-						"error": fiber.Map{
-							"message": "Table does not exist",
-							"type":    "NoSuchTableException",
-							"code":    404,
-						},
-					})
-				}
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-					"error": err.Error(),
-				})
-			}
-		}
-
-		// 2. Lấy nội dung metadata JSON từ S3 MinIO bằng đúng con trỏ tìm được
-		var data []byte
-		var err error
-		if metadataPath != "" {
+		metadataPath, err := catalogStore.GetTablePointer(c.Context(), id)
+		if err == nil {
+			var data []byte
 			data, err = store.GetMetadataByLocation(c.Context(), metadataPath)
-		} else {
-			data, err = store.GetTableMetadata(c.Context(), id)
-		}
-
-		if err != nil {
-			if err == storage.ErrTableNotFound {
-				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-					"error": fiber.Map{
-						"message": "Table metadata does not exist",
-						"type":    "NoSuchTableException",
-						"code":    404,
-					},
-				})
+			if err == nil {
+				c.Set("Content-Type", "application/json")
+				return c.Send(data)
 			}
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": err.Error(),
-			})
 		}
-
-		c.Set("Content-Type", "application/json")
-		return c.Send(data)
+		if err == storage.ErrTableNotFound {
+			return writeError(c, fiber.StatusNotFound, "NoSuchTableException", "Table does not exist")
+		}
+		return writeError(c, fiber.StatusInternalServerError, "InternalServerError", err.Error())
 	})
 
-	// Ticket 03 & Sync-01 & Sync-02: Ingestion Commit API
+	// Commit table: write the pointer synchronously, then hand the delta to the async queue.
 	app.Post("/v1/namespaces/:namespace/tables/:table", func(c *fiber.Ctx) error {
 		id := domain.NewTableIdentifier(c.Params("namespace"), c.Params("table"))
 
-		var payload map[string]interface{}
-		_ = c.BodyParser(&payload)
-
-		metadataPath, ok := payload["metadata-location"].(string)
-		if !ok || metadataPath == "" {
-			metadataPath = "s3://lakehouse/" + id.Namespace + "/" + id.Table + "/metadata/current.json"
-			_ = store.SaveTableMetadata(c.Context(), id, c.Body())
+		req, err := domain.ParseUpdateTableRequest(c.Body())
+		if err != nil {
+			return writeError(c, fiber.StatusBadRequest, "BadRequestException", err.Error())
+		}
+		if req.MetadataLocation == "" {
+			return writeError(c, fiber.StatusBadRequest, "BadRequestException", "metadata-location is required")
 		}
 
-		previousLocation, _ := payload["previous-metadata-location"].(string)
-
-		// Bước 1: GHI ĐỒNG BỘ VÀO POSTGRES CÓ KIỂM TRA CAS (< 2ms)
-		if catalogStore != nil {
-			if err := catalogStore.SaveTablePointer(c.Context(), id, metadataPath, previousLocation); err != nil {
-				if err == storage.ErrCommitConflict {
-					return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-						"error": fiber.Map{
-							"message": "Commit failed: table pointer conflict or concurrent update",
-							"type":    "CommitFailedException",
-							"code":    409,
-						},
-					})
-				}
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-					"error": fiber.Map{
-						"message": err.Error(),
-						"type":    "InternalServerError",
-						"code":    500,
-					},
-				})
+		if err := catalogStore.SaveTablePointer(c.Context(), id, req.MetadataLocation, req.PreviousMetadataLocation); err != nil {
+			if err == storage.ErrCommitConflict {
+				return writeError(c, fiber.StatusConflict, "CommitFailedException", "Commit failed: table pointer conflict or concurrent update")
 			}
+			return writeError(c, fiber.StatusInternalServerError, "InternalServerError", err.Error())
 		}
 
-		// Trích xuất snapshot-id thật từ payload updates (Ticket Fix-04)
-		var snapshotID int64
-		if updates, ok := payload["updates"].([]interface{}); ok {
-			for _, u := range updates {
-				if updateMap, ok := u.(map[string]interface{}); ok {
-					if sid, exists := updateMap["snapshot-id"].(float64); exists {
-						snapshotID = int64(sid)
-						break
-					}
-				}
-			}
+		if !queue.Submit(engine.CommitTask{
+			Table:            id,
+			MetadataLocation: req.MetadataLocation,
+			SnapshotID:       req.CommittedSnapshotID(),
+		}) {
+			c.Set("Retry-After", "1")
+			return writeError(c, fiber.StatusTooManyRequests, "QueueSaturatedException", "Ingestion queue is saturated. Please retry with backoff.")
 		}
 
-		// Bước 2: KÍCH HOẠT ĐỒNG BỘ DUCKLAKE QUA QUEUE VỚI CƠ CHẾ BACKPRESSURE (Ticket Fix-04)
-		if queue != nil {
-			ok := queue.Submit(engine.CommitTask{
-				Table:            id,
-				MetadataLocation: metadataPath,
-				SnapshotID:       snapshotID,
-			})
-			if !ok {
-				return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-					"error": fiber.Map{
-						"message": "Ingestion queue is saturated. Please retry with exponential backoff.",
-						"type":    "QueueSaturatedException",
-						"code":    429,
-					},
-				})
-			}
-		}
-		
-		// Bước 3: TRẢ VỀ 200 OK NGAY CHO REDPANDA (< 15ms SLA)
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"metadata-location": metadataPath,
-			"table-uuid":        "uuid-123",
+			"metadata-location": req.MetadataLocation,
 		})
 	})
 }
