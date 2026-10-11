@@ -56,7 +56,7 @@ func (r *UpdateTableRequest) CommittedSnapshotID() int64 {
 	var id int64
 	for _, u := range r.Updates {
 		switch u.Action {
-		case "set-snapshot-ref":
+		case "set-snapshot-ref", "set-current-snapshot":
 			if u.SnapshotID != 0 {
 				return u.SnapshotID
 			}

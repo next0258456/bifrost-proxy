@@ -4,9 +4,9 @@
 
 **Blocked by:** Master-01: Centralized Config & TableIdentifier Ubiquitous Refactor
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Tạo file `domain/iceberg.go` định nghĩa các struct `UpdateTableRequest`, `TableRequirement`, `TableUpdate` và hàm `ParseUpdateTableRequest(body []byte)`.
-- [ ] Thêm hàm helper `writeError(c *fiber.Ctx, status int, errorType, message string)` trong `api/catalog.go`.
-- [ ] Tích hợp parser vào `POST /v1/namespaces/:namespace/tables/:table`.
-- [ ] Set header `c.Set("Retry-After", "1")` khi trả về mã lỗi HTTP 429.
+- [x] Tạo file `domain/iceberg.go` định nghĩa các struct `UpdateTableRequest`, `TableRequirement`, `TableUpdate` và hàm `ParseUpdateTableRequest(body []byte)`.
+- [x] Thêm hàm helper `writeError(c *fiber.Ctx, status int, errorType, message string)` trong `api/catalog.go`.
+- [x] Tích hợp parser vào `POST /v1/namespaces/:namespace/tables/:table`.
+- [x] Set header `c.Set("Retry-After", "1")` khi trả về mã lỗi HTTP 429.

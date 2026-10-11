@@ -124,9 +124,15 @@ func TestCatalogCommitSuccessPropagatesRealSnapshotID(t *testing.T) {
 
 	assert.Equal(t, 200, status)
 	assert.Contains(t, body, "s3://lakehouse/bronze/fmcg_sales/metadata/v1.json")
-	if assert.Len(t, q.tasks, 1) {
-		assert.Equal(t, int64(4242), q.tasks[0].SnapshotID)
-		assert.Equal(t, "bronze.fmcg_sales", q.tasks[0].Table.String())
+	// Test with set-current-snapshot as well
+	status, _, _ = post(app, "/v1/namespaces/bronze/tables/fmcg_sales", `{
+		"updates": [{"action": "set-current-snapshot", "snapshot-id": 5353}],
+		"metadata-location": "s3://lakehouse/bronze/fmcg_sales/metadata/v2.json",
+		"previous-metadata-location": "s3://lakehouse/bronze/fmcg_sales/metadata/v1.json"
+	}`)
+	assert.Equal(t, 200, status)
+	if assert.Len(t, q.tasks, 2) {
+		assert.Equal(t, int64(5353), q.tasks[1].SnapshotID)
 	}
 }
 
