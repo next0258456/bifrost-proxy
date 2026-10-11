@@ -12,15 +12,18 @@
 
 ## 2. Solution (Giải pháp Kiến trúc)
 
-Bifrost Proxy đóng vai trò là một **"Event Router & Metadata Synchronizer" siêu nhẹ**:
-1. **Phía Catalog REST (Giao diện với Redpanda):**
+Bifrost Proxy đóng vai trò là một **"Event Router & Metadata Synchronizer" siêu nhẹ** với mô hình phân chia luồng rõ ràng:
+
+1. **Phía Catalog REST (Ghi Đồng bộ - Synchronous, < 5ms):**
    - Hứng HTTP `POST /v1/namespaces/{ns}/tables/{table}` từ Redpanda Iceberg Sink.
-   - Cập nhật con trỏ bảng bền vững vào cơ sở dữ liệu PostgreSQL (`polaris` DB).
-   - Trả lời `200 OK` ngay lập tức để thỏa mãn SLA `< 15ms`.
-2. **Phía Đồng bộ Incremental (Giao diện với DuckLake):**
-   - Đẩy thông tin commit vào **Go Worker Pool (Channel Queue)**.
+   - Kiểm tra điều kiện Optimistic Concurrency Control (CAS).
+   - **Ghi trực tiếp con trỏ bảng `metadata_location` vào PostgreSQL (`polaris` DB) ĐỒNG BỘ ngay trong request:** Thao tác này bằng Go `pgx` chỉ tốn ~1 - 2ms.
+   - **Trả lời `200 OK` ngay sau khi Postgres chốt sổ:** Tổng thời gian phản hồi chỉ mất **~3 - 5ms** (đè bẹp SLA `< 15ms`). Đảm bảo tính nhất quán (ACID) của Catalog mà Redpanda không bao giờ bị nghẽn.
+
+2. **Phía Đồng bộ DuckLake (Ghi Bất đồng bộ - Asynchronous Background):**
+   - Sau khi trả 200 OK, Proxy đẩy thông tin snapshot vừa commit vào **Go Worker Pool (Channel Queue)**.
    - Worker chạy ngầm bóc tách **đúng phần delta** của snapshot vừa commit (chỉ các file mới thêm hoặc mới xóa).
-   - Ghi thẳng các bản ghi delta này vào **hệ thống 14 bảng Metadata Catalog chuẩn của DuckLake** trên DuckDB/S3.
+   - Ghi thẳng các bản ghi delta này vào **hệ thống 14 bảng Metadata Catalog chuẩn của DuckLake** trên DuckDB/S3 mà hoàn toàn không ảnh hưởng tới độ trễ của Redpanda.
 
 ---
 
@@ -59,15 +62,19 @@ Proxy sẽ duy trì và cập nhật trực tiếp vào hệ thống bảng meta
 
 ## 5. Implementation Decisions (Quy chuẩn Kỹ thuật)
 
-1. **Worker Pool (Queue):**
+1. **Lưu trữ Con trỏ Catalog (PostgreSQL Persistence - Đồng bộ):**
+   - Kết nối trực tiếp vào Postgres container (`postgres:5432/polaris`) bằng `jackc/pgx/v5` connection pool.
+   - Thao tác ghi con trỏ bảng (`catalog_tables`) diễn ra đồng bộ (Synchronous) và hoàn tất trước khi gửi HTTP response.
+   - Cam kết độ trễ tầng DB: `< 2ms`.
+2. **Worker Pool (Queue - Bất đồng bộ):**
    - Sử dụng Buffered Channel trong Go (`chan CommitTask`) với kích thước buffer cấu hình được (mặc định 1000).
    - Số lượng worker: Mặc định 1 worker chạy tuần tự để loại trừ xung đột ghi (lock contention) và bảo vệ RAM.
-2. **Khống chế Tài nguyên (Memory Limit):**
+3. **Khống chế Tài nguyên (Memory Limit):**
    - Thiết lập `PRAGMA threads = 1;` cho DuckDB connection.
    - Giới hạn bộ nhớ: `PRAGMA memory_limit = '250MB';`.
    - Go Runtime: `GOMEMLIMIT=250MiB` và `GOGC=50`.
    - Tổng RAM container đảm bảo luôn nằm dưới trần co giãn 512MB (idle < 50MB).
-3. **Singleton Catalog Connection:**
+4. **Singleton Catalog Connection:**
    - Khởi tạo S3 Secret và `ATTACH` DuckLake Catalog 1 lần duy nhất lúc khởi động Proxy.
    - Tái sử dụng connection cho toàn bộ các tác vụ incremental sync, không re-attach mỗi commit.
 
