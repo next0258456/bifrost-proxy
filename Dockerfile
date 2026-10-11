@@ -1,5 +1,5 @@
 # Build stage (using glibc due to DuckDB CGO requirement)
-FROM golang:1.24-bookworm AS builder
+FROM golang:bookworm AS builder
 
 WORKDIR /app
 

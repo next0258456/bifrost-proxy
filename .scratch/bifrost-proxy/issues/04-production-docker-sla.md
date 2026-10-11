@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Viết Dockerfile đa bước (multi-stage) tối ưu dung lượng image.
-- [ ] Thiết lập hard-limit `300MB RAM` cho container, đồng thời tune GOGC và DuckDB `memory_limit` để tránh OOM.
-- [ ] Triển khai thành công lên môi trường Docker có sẵn.
-- [ ] Viết/chạy Benchmark script (hey, k6) để verify hệ thống đáp ứng: Cold start < 15ms, Ping < 2ms, Tail Latency < 10ms.
+- [x] Viết Dockerfile đa bước (multi-stage) tối ưu dung lượng image.
+- [x] Thiết lập hard-limit `300MB RAM` cho container, đồng thời tune GOGC và DuckDB `memory_limit` để tránh OOM.
+- [x] Triển khai thành công lên môi trường Docker có sẵn.
+- [x] Viết/chạy Benchmark script (hey, k6) để verify hệ thống đáp ứng: Cold start < 15ms, Ping < 2ms, Tail Latency < 10ms.

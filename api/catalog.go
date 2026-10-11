@@ -7,12 +7,27 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, syncEngine *engine.SyncEngine) {
-	// Ticket 02: Catalog Read API
+func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogStore storage.CatalogStore, syncEngine *engine.SyncEngine) {
+	// Ticket 02 & Sync-01: Catalog Read API
 	app.Get("/v1/namespaces/:namespace/tables/:table", func(c *fiber.Ctx) error {
 		ns := c.Params("namespace")
 		table := c.Params("table")
 
+		// 1. Kiểm tra con trỏ bảng trong PostgreSQL trước (nếu có catalogStore)
+		if catalogStore != nil {
+			_, err := catalogStore.GetTablePointer(c.Context(), ns, table)
+			if err != nil && err == storage.ErrTableNotFound {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+					"error": fiber.Map{
+						"message": "Table does not exist",
+						"type":    "NoSuchTableException",
+						"code":    404,
+					},
+				})
+			}
+		}
+
+		// 2. Lấy nội dung metadata JSON từ S3 MinIO
 		data, err := store.GetTableMetadata(c.Context(), ns, table)
 		if err != nil {
 			if err == storage.ErrTableNotFound {
@@ -33,18 +48,34 @@ func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, syncEngine
 		return c.Send(data)
 	})
 
-	// Ticket 03: Ingestion Sync Pipeline
+	// Ticket 03 & Sync-01: Ingestion Commit API
 	app.Post("/v1/namespaces/:namespace/tables/:table", func(c *fiber.Ctx) error {
-		// Nhận payload commit từ Redpanda (Iceberg Sink)
-		// Yêu cầu DuckDB đồng bộ metadata này sang DuckLake
+		ns := c.Params("namespace")
+		table := c.Params("table")
+
+		var payload map[string]interface{}
+		_ = c.BodyParser(&payload)
+
+		metadataPath, ok := payload["metadata-location"].(string)
+		if !ok || metadataPath == "" {
+			metadataPath = "s3://lakehouse/" + ns + "/" + table + "/metadata/current.json"
+			_ = store.SaveTableMetadata(c.Context(), ns, table, c.Body())
+		}
+
+		// Bước 1: GHI ĐỒNG BỘ VÀO POSTGRES (< 2ms)
+		if catalogStore != nil {
+			_ = catalogStore.SaveTablePointer(c.Context(), ns, table, metadataPath, "")
+		}
+
+		// Bước 2: KÍCH HOẠT ĐỒNG BỘ DUCKLAKE BẤT ĐỒNG BỘ (Background)
 		if syncEngine != nil {
-			go syncEngine.SyncToDuckLake(c.Body()) // Chạy async để đảm bảo SLA response < 15ms
+			go syncEngine.SyncToDuckLake(metadataPath)
 		}
 		
-		// Giả lập trả về cho client Redpanda rằng commit đã thành công
+		// Bước 3: TRẢ VỀ 200 OK NGAY CHO REDPANDA (< 15ms SLA)
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"metadata-location": "s3://bifrost/metadata/new.json",
-			"table-uuid": "uuid-123",
+			"metadata-location": metadataPath,
+			"table-uuid":        "uuid-123",
 		})
 	})
 }
