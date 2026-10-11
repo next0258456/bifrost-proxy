@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"strings"
@@ -38,8 +39,24 @@ func (m *fakeStorage) SaveTableMetadata(ctx context.Context, id domain.TableIden
 }
 
 // fakeCatalog is an in-memory catalog pointer store honouring CAS semantics.
+// fakeCatalog is an in-memory catalog pointer store honouring CAS semantics and Iceberg requirements.
 type fakeCatalog struct {
-	pointers map[string]string
+	pointers  map[string]string
+	uuids     map[string]string
+	snapshots map[string]int64
+	schemas   map[string]int
+}
+
+func newFakeCatalog(pointers map[string]string) *fakeCatalog {
+	if pointers == nil {
+		pointers = make(map[string]string)
+	}
+	return &fakeCatalog{
+		pointers:  pointers,
+		uuids:     make(map[string]string),
+		snapshots: make(map[string]int64),
+		schemas:   make(map[string]int),
+	}
 }
 
 func (m *fakeCatalog) GetTablePointer(ctx context.Context, id domain.TableIdentifier) (string, error) {
@@ -50,16 +67,85 @@ func (m *fakeCatalog) GetTablePointer(ctx context.Context, id domain.TableIdenti
 	return ptr, nil
 }
 
-func (m *fakeCatalog) SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error {
-	curr, exists := m.pointers[id.String()]
+func (m *fakeCatalog) ValidateRequirements(ctx context.Context, id domain.TableIdentifier, reqs []domain.TableRequirement) error {
+	key := id.String()
+	_, exists := m.pointers[key]
+	for _, req := range reqs {
+		switch req.Type {
+		case "assert-create":
+			if exists {
+				return fmt.Errorf("%w: requirement failed: table already exists", storage.ErrCommitConflict)
+			}
+		case "assert-table-uuid":
+			if !exists {
+				return fmt.Errorf("%w: requirement failed: table does not exist", storage.ErrCommitConflict)
+			}
+			currUUID, ok := m.uuids[key]
+			if ok && req.UUID != "" && currUUID != req.UUID {
+				return fmt.Errorf("%w: requirement failed: table UUID does not match (expected %s, got %s)", storage.ErrCommitConflict, req.UUID, currUUID)
+			}
+		case "assert-ref-snapshot-id":
+			if !exists {
+				if req.SnapshotID != nil && *req.SnapshotID != -1 {
+					return fmt.Errorf("%w: requirement failed: table does not exist", storage.ErrCommitConflict)
+				}
+			} else {
+				currSnap, ok := m.snapshots[key]
+				if req.SnapshotID == nil || *req.SnapshotID == -1 {
+					if ok {
+						return fmt.Errorf("%w: requirement failed: branch %s expected null snapshot but was %d", storage.ErrCommitConflict, req.Ref, currSnap)
+					}
+				} else {
+					if !ok || currSnap != *req.SnapshotID {
+						actual := int64(0)
+						if ok {
+							actual = currSnap
+						}
+						return fmt.Errorf("%w: requirement failed: branch %s was %d but expected %d", storage.ErrCommitConflict, req.Ref, actual, *req.SnapshotID)
+					}
+				}
+			}
+		case "assert-current-schema-id":
+			if !exists {
+				return fmt.Errorf("%w: requirement failed: table does not exist", storage.ErrCommitConflict)
+			}
+			currSchema, ok := m.schemas[key]
+			if req.CurrentSchemaID != nil && (!ok || currSchema != *req.CurrentSchemaID) {
+				actual := 0
+				if ok {
+					actual = currSchema
+				}
+				return fmt.Errorf("%w: requirement failed: current schema id mismatch (expected %d, got %d)", storage.ErrCommitConflict, *req.CurrentSchemaID, actual)
+			}
+		}
+	}
+	return nil
+}
+
+func (m *fakeCatalog) SaveTableCommit(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string, tableUUID string, snapshotID *int64, schemaID *int) error {
+	key := id.String()
+	curr, exists := m.pointers[key]
 	if previousLocation == "" && exists {
 		return storage.ErrCommitConflict
 	}
 	if previousLocation != "" && curr != previousLocation {
 		return storage.ErrCommitConflict
 	}
-	m.pointers[id.String()] = metadataLocation
+	m.pointers[key] = metadataLocation
+	if tableUUID != "" {
+		m.uuids[key] = tableUUID
+	}
+	if snapshotID != nil {
+		m.snapshots[key] = *snapshotID
+	}
+	if schemaID != nil {
+		m.schemas[key] = *schemaID
+	}
 	return nil
+}
+
+func (m *fakeCatalog) SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error {
+	return m.SaveTableCommit(ctx, id, metadataLocation, previousLocation, "", nil, nil)
 }
 
 func (m *fakeCatalog) Close() {}
@@ -82,7 +168,7 @@ func (q *recordingQueue) Stop() {}
 
 func newApp(files map[string][]byte, pointers map[string]string, queue engine.QueueService) *fiber.App {
 	app := fiber.New()
-	api.SetupCatalogRoutes(app, &fakeStorage{files: files}, &fakeCatalog{pointers: pointers}, queue)
+	api.SetupCatalogRoutes(app, &fakeStorage{files: files}, newFakeCatalog(pointers), queue)
 	return app
 }
 
@@ -170,3 +256,90 @@ func TestCatalogCommitSaturatedQueueReturns429WithRetryAfter(t *testing.T) {
 	assert.Equal(t, "1", headers["Retry-After"])
 	assert.Contains(t, body, "QueueSaturatedException")
 }
+
+func TestCatalogCommitConflictOnMismatchedUUID(t *testing.T) {
+	app := newApp(nil, map[string]string{}, &recordingQueue{})
+	path := "/v1/namespaces/default/tables/uuid_test"
+
+	// Create table with UUID "real-uuid-1"
+	status, _, _ := post(app, path, `{
+		"updates": [{"action": "assign-uuid", "uuid": "real-uuid-1"}],
+		"metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 200, status)
+
+	// Try update with wrong asserted UUID
+	status, body, _ := post(app, path, `{
+		"requirements": [{"type": "assert-table-uuid", "uuid": "wrong-uuid"}],
+		"metadata-location": "s3://b/v2.json",
+		"previous-metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 409, status)
+	assert.Contains(t, body, "CommitFailedException")
+	assert.Contains(t, body, "table UUID does not match")
+}
+
+func TestCatalogCommitConflictOnMismatchedSnapshotID(t *testing.T) {
+	app := newApp(nil, map[string]string{}, &recordingQueue{})
+	path := "/v1/namespaces/default/tables/snap_test"
+
+	// Initial commit: snapshot 100
+	status, _, _ := post(app, path, `{
+		"updates": [{"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 100}],
+		"metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 200, status)
+
+	// Subsequent commit asserts snapshot 99 (stale/mismatched branch)
+	status, body, _ := post(app, path, `{
+		"requirements": [{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": 99}],
+		"metadata-location": "s3://b/v2.json",
+		"previous-metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 409, status)
+	assert.Contains(t, body, "CommitFailedException")
+	assert.Contains(t, body, "expected 99")
+}
+
+func TestCatalogCommitConflictOnAssertCreateWhenTableExists(t *testing.T) {
+	app := newApp(nil, map[string]string{"default.existing": "s3://b/v1.json"}, &recordingQueue{})
+
+	status, body, _ := post(app, "/v1/namespaces/default/tables/existing", `{
+		"requirements": [{"type": "assert-create"}],
+		"metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 409, status)
+	assert.Contains(t, body, "CommitFailedException")
+	assert.Contains(t, body, "already exists")
+}
+
+func TestCatalogCommitSuccessWithValidRequirements(t *testing.T) {
+	app := newApp(nil, map[string]string{}, &recordingQueue{})
+	path := "/v1/namespaces/default/tables/ok_test"
+
+	// Create with assert-create
+	status, _, _ := post(app, path, `{
+		"requirements": [{"type": "assert-create"}],
+		"updates": [
+			{"action": "assign-uuid", "uuid": "valid-uuid"},
+			{"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 500}
+		],
+		"metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 200, status)
+
+	// Update with matching UUID and matching snapshot
+	status, _, _ = post(app, path, `{
+		"requirements": [
+			{"type": "assert-table-uuid", "uuid": "valid-uuid"},
+			{"type": "assert-ref-snapshot-id", "ref": "main", "snapshot-id": 500}
+		],
+		"updates": [
+			{"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 501}
+		],
+		"metadata-location": "s3://b/v2.json",
+		"previous-metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 200, status)
+}
+

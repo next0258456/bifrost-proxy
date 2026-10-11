@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+
 	"bifrost-proxy/domain"
 	"bifrost-proxy/engine"
 	"bifrost-proxy/storage"
@@ -51,8 +53,24 @@ func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogSto
 			return writeError(c, fiber.StatusBadRequest, "BadRequestException", "metadata-location is required")
 		}
 
-		if err := catalogStore.SaveTablePointer(c.Context(), id, req.MetadataLocation, req.PreviousMetadataLocation); err != nil {
-			if err == storage.ErrCommitConflict {
+		if err := catalogStore.ValidateRequirements(c.Context(), id, req.Requirements); err != nil {
+			if errors.Is(err, storage.ErrCommitConflict) {
+				return writeError(c, fiber.StatusConflict, "CommitFailedException", err.Error())
+			}
+			return writeError(c, fiber.StatusInternalServerError, "InternalServerError", err.Error())
+		}
+
+		var snapshotIDPtr *int64
+		if sID := req.CommittedSnapshotID(); sID != 0 {
+			snapshotIDPtr = &sID
+		}
+		var schemaIDPtr *int
+		if sID := req.CommittedSchemaID(); sID != nil {
+			schemaIDPtr = sID
+		}
+
+		if err := catalogStore.SaveTableCommit(c.Context(), id, req.MetadataLocation, req.PreviousMetadataLocation, req.CommittedTableUUID(), snapshotIDPtr, schemaIDPtr); err != nil {
+			if errors.Is(err, storage.ErrCommitConflict) {
 				return writeError(c, fiber.StatusConflict, "CommitFailedException", "Commit failed: table pointer conflict or concurrent update")
 			}
 			return writeError(c, fiber.StatusInternalServerError, "InternalServerError", err.Error())

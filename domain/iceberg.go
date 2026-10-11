@@ -26,11 +26,13 @@ type TableRequirement struct {
 
 // TableUpdate is one metadata change in a commit.
 type TableUpdate struct {
-	Action     string          `json:"action"` // add-snapshot, set-snapshot-ref, add-schema, set-current-schema, ...
-	RefName    string          `json:"ref-name,omitempty"`
-	SnapshotID int64           `json:"snapshot-id,omitempty"`
-	SchemaID   int             `json:"schema-id,omitempty"`
-	Snapshot   *SnapshotUpdate `json:"snapshot,omitempty"`
+	Action           string          `json:"action"` // add-snapshot, set-snapshot-ref, add-schema, set-current-schema, assign-uuid...
+	RefName          string          `json:"ref-name,omitempty"`
+	SnapshotID       int64           `json:"snapshot-id,omitempty"`
+	SchemaID         int             `json:"schema-id,omitempty"`
+	UUID             string          `json:"uuid,omitempty"`
+	Snapshot         *SnapshotUpdate `json:"snapshot,omitempty"`
+	MetadataLocation string          `json:"metadata-location,omitempty"`
 }
 
 // SnapshotUpdate is the snapshot carried by an add-snapshot update.
@@ -68,3 +70,30 @@ func (r *UpdateTableRequest) CommittedSnapshotID() int64 {
 	}
 	return id
 }
+
+// CommittedTableUUID extracts the UUID assigned or asserted in this commit.
+func (r *UpdateTableRequest) CommittedTableUUID() string {
+	for _, u := range r.Updates {
+		if u.Action == "assign-uuid" && u.UUID != "" {
+			return u.UUID
+		}
+	}
+	for _, req := range r.Requirements {
+		if req.Type == "assert-table-uuid" && req.UUID != "" {
+			return req.UUID
+		}
+	}
+	return ""
+}
+
+// CommittedSchemaID extracts the schema id set by this commit, or nil if none.
+func (r *UpdateTableRequest) CommittedSchemaID() *int {
+	for _, u := range r.Updates {
+		if (u.Action == "set-current-schema" || u.Action == "add-schema") && u.SchemaID != 0 {
+			s := u.SchemaID
+			return &s
+		}
+	}
+	return nil
+}
+
