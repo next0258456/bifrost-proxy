@@ -7,7 +7,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogStore storage.CatalogStore, syncEngine *engine.SyncEngine) {
+func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogStore storage.CatalogStore, queue *engine.IngestionQueue) {
 	// Ticket 02 & Sync-01: Catalog Read API
 	app.Get("/v1/namespaces/:namespace/tables/:table", func(c *fiber.Ctx) error {
 		ns := c.Params("namespace")
@@ -48,7 +48,7 @@ func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogSto
 		return c.Send(data)
 	})
 
-	// Ticket 03 & Sync-01: Ingestion Commit API
+	// Ticket 03 & Sync-01 & Sync-02: Ingestion Commit API
 	app.Post("/v1/namespaces/:namespace/tables/:table", func(c *fiber.Ctx) error {
 		ns := c.Params("namespace")
 		table := c.Params("table")
@@ -67,9 +67,13 @@ func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogSto
 			_ = catalogStore.SaveTablePointer(c.Context(), ns, table, metadataPath, "")
 		}
 
-		// Bước 2: KÍCH HOẠT ĐỒNG BỘ DUCKLAKE BẤT ĐỒNG BỘ (Background)
-		if syncEngine != nil {
-			go syncEngine.SyncToDuckLake(metadataPath)
+		// Bước 2: KÍCH HOẠT ĐỒNG BỘ DUCKLAKE BẤT ĐỒNG BỘ QUA QUEUE (Ticket Sync-02)
+		if queue != nil {
+			queue.Submit(engine.CommitTask{
+				Namespace:        ns,
+				TableName:        table,
+				MetadataLocation: metadataPath,
+			})
 		}
 		
 		// Bước 3: TRẢ VỀ 200 OK NGAY CHO REDPANDA (< 15ms SLA)

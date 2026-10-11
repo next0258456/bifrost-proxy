@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Cài đặt driver PostgreSQL `github.com/jackc/pgx/v5`.
-- [ ] Khởi tạo connection pool tới Postgres và tự động tạo bảng `catalog_tables(namespace, table_name, metadata_location, previous_metadata_location, updated_at)`.
-- [ ] Triển khai hàm `SaveTablePointer` và `GetTablePointer` trong tầng storage/db.
-- [ ] Cập nhật endpoint `POST` và `GET` trong `api/catalog.go` sử dụng Postgres con trỏ.
-- [ ] Viết unit/integration test xác nhận commit đồng bộ lưu thành công vào Postgres và trả về < 15ms.
+- [x] Cài đặt driver PostgreSQL `github.com/jackc/pgx/v5`.
+- [x] Khởi tạo connection pool tới Postgres và tự động tạo bảng `catalog_tables(namespace, table_name, metadata_location, previous_metadata_location, updated_at)`.
+- [x] Triển khai hàm `SaveTablePointer` và `GetTablePointer` trong tầng storage/db.
+- [x] Cập nhật endpoint `POST` và `GET` trong `api/catalog.go` sử dụng Postgres con trỏ.
+- [x] Viết unit/integration test xác nhận commit đồng bộ lưu thành công vào Postgres và trả về < 15ms.

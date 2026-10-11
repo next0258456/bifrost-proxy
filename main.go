@@ -45,7 +45,7 @@ func main() {
 		defer catalogStore.Close()
 	}
 
-	// 3. DuckDB Sync Engine setup
+	// 3. DuckDB Sync Engine setup & Ingestion Queue (Sync-02)
 	syncEngine, err := engine.NewSyncEngine()
 	if err != nil {
 		log.Printf("Warning: Failed to init DuckDB engine: %v", err)
@@ -53,9 +53,12 @@ func main() {
 		defer syncEngine.Close()
 	}
 
+	queue := engine.NewIngestionQueue(syncEngine, 1000)
+	defer queue.Stop()
+
 	// 4. Mount Routes
 	api.SetupAuthRoutes(app)
-	api.SetupCatalogRoutes(app, store, catalogStore, syncEngine)
+	api.SetupCatalogRoutes(app, store, catalogStore, queue)
 
 	log.Println("Bifrost Proxy is starting on :8080...")
 	log.Fatal(app.Listen(":8080"))

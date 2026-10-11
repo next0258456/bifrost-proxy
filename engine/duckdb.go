@@ -20,6 +20,11 @@ func NewSyncEngine() (*SyncEngine, error) {
 		return nil, err
 	}
 
+	// Cấu hình tài nguyên khắt khe (Ticket Sync-02)
+	db.Exec("PRAGMA threads = 1;")
+	db.Exec("PRAGMA memory_limit = '250MB';")
+	db.Exec("PRAGMA preserve_insertion_order = false;")
+
 	// Load extensions cần thiết để parse Avro và Iceberg tree
 	db.Exec("INSTALL httpfs; LOAD httpfs;")
 	db.Exec("INSTALL iceberg; LOAD iceberg;")

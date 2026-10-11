@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"bifrost-proxy/api"
+	"bifrost-proxy/engine"
 	"bifrost-proxy/storage"
 
 	"github.com/gofiber/fiber/v2"
@@ -90,7 +91,10 @@ func TestCatalogCommit(t *testing.T) {
 	app := fiber.New()
 	store := &MockStorage{Tables: map[string][]byte{}}
 	catStore := &MockCatalogStore{Pointers: map[string]string{}}
-	api.SetupCatalogRoutes(app, store, catStore, nil)
+	queue := engine.NewIngestionQueue(nil, 100)
+	defer queue.Stop()
+
+	api.SetupCatalogRoutes(app, store, catStore, queue)
 
 	req := httptest.NewRequest("POST", "/v1/namespaces/default/tables/test_table", nil)
 	resp, _ := app.Test(req, -1)
