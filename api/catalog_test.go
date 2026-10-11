@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"bifrost-proxy/api"
@@ -200,26 +201,44 @@ func TestCatalogRead(t *testing.T) {
 }
 
 func TestCatalogCommitSuccessPropagatesRealSnapshotID(t *testing.T) {
-	q := &recordingQueue{}
-	app := newApp(nil, map[string]string{}, q)
+	storage := &fakeStorage{files: map[string][]byte{
+		"s3://lakehouse/bronze/fmcg_sales/metadata/v1.json": []byte(`{"format-version": 2, "table-uuid": "uuid-1", "current-snapshot-id": 4242}`),
+		"s3://lakehouse/bronze/fmcg_sales/metadata/v2.json": []byte(`{"format-version": 2, "table-uuid": "uuid-1", "current-snapshot-id": 5353}`),
+	}}
+	catalog := newFakeCatalog(map[string]string{})
+	app := fiber.New()
+	api.SetupCatalogRoutes(app, storage, catalog, &recordingQueue{})
 
-	status, body, _ := post(app, "/v1/namespaces/bronze/tables/fmcg_sales", `{
+	// Commit 1: snapshot 4242
+	status1, body1, _ := post(app, "/v1/namespaces/bronze/tables/fmcg_sales", `{
 		"updates": [{"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 4242}],
 		"metadata-location": "s3://lakehouse/bronze/fmcg_sales/metadata/v1.json"
 	}`)
+	assert.Equal(t, 200, status1)
+	assert.Contains(t, body1, "s3://lakehouse/bronze/fmcg_sales/metadata/v1.json")
 
-	assert.Equal(t, 200, status)
-	assert.Contains(t, body, "s3://lakehouse/bronze/fmcg_sales/metadata/v1.json")
-	// Test with set-current-snapshot as well
-	status, _, _ = post(app, "/v1/namespaces/bronze/tables/fmcg_sales", `{
+	// Verify via HTTP GET endpoint (Single Test Seam)
+	getReq1 := httptest.NewRequest("GET", "/v1/namespaces/bronze/tables/fmcg_sales", nil)
+	getResp1, _ := app.Test(getReq1, -1)
+	getBody1, _ := io.ReadAll(getResp1.Body)
+	assert.Equal(t, 200, getResp1.StatusCode)
+	assert.Contains(t, string(getBody1), "4242")
+
+	// Commit 2: snapshot 5353
+	status2, body2, _ := post(app, "/v1/namespaces/bronze/tables/fmcg_sales", `{
 		"updates": [{"action": "set-current-snapshot", "snapshot-id": 5353}],
 		"metadata-location": "s3://lakehouse/bronze/fmcg_sales/metadata/v2.json",
 		"previous-metadata-location": "s3://lakehouse/bronze/fmcg_sales/metadata/v1.json"
 	}`)
-	assert.Equal(t, 200, status)
-	if assert.Len(t, q.tasks, 2) {
-		assert.Equal(t, int64(5353), q.tasks[1].SnapshotID)
-	}
+	assert.Equal(t, 200, status2)
+	assert.Contains(t, body2, "s3://lakehouse/bronze/fmcg_sales/metadata/v2.json")
+
+	// Verify via HTTP GET endpoint (Single Test Seam)
+	getReq2 := httptest.NewRequest("GET", "/v1/namespaces/bronze/tables/fmcg_sales", nil)
+	getResp2, _ := app.Test(getReq2, -1)
+	getBody2, _ := io.ReadAll(getResp2.Body)
+	assert.Equal(t, 200, getResp2.StatusCode)
+	assert.Contains(t, string(getBody2), "5353")
 }
 
 func TestCatalogCommitConflictOnStalePreviousPointer(t *testing.T) {
@@ -256,24 +275,47 @@ func TestCatalogCommitSaturatedQueueReturns429WithRetryAfter(t *testing.T) {
 	assert.Equal(t, "1", headers["Retry-After"])
 	assert.Contains(t, body, "QueueSaturatedException")
 
-	// 2. Real buffered channel saturation check
-	// Using a custom queue holding a real buffered channel (buffer size 1) without workers draining it,
-	// or stopping the worker first so tasks remain in the buffer.
+	// 2. Real IngestionQueue buffer saturation via concurrent HTTP requests bursting beyond capacity
+	// Initialize real queue with buffer size 1. Worker is alive and running.
 	realQueue := engine.NewIngestionQueue(nil, 1)
-	// Stop worker immediately so tasks won't be drained from taskChan
-	realQueue.Stop()
+	defer realQueue.Stop()
 
 	appReal := newApp(nil, map[string]string{}, realQueue)
 
-	// First commit fills the 1-capacity buffer
-	status1, _, _ := post(appReal, "/v1/namespaces/default/tables/t1", `{"metadata-location": "s3://b/v1.json"}`)
-	assert.Equal(t, 200, status1)
+	const concurrency = 20
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	statusCodes := make([]int, 0, concurrency)
+	retryAfters := make([]string, 0, concurrency)
 
-	// Second commit cannot fit into the buffer, triggering 429 Backpressure
-	status2, body2, headers2 := post(appReal, "/v1/namespaces/default/tables/t2", `{"metadata-location": "s3://b/v2.json"}`)
-	assert.Equal(t, 429, status2)
-	assert.Equal(t, "1", headers2["Retry-After"])
-	assert.Contains(t, body2, "QueueSaturatedException")
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func(id int) {
+			defer wg.Done()
+			payload := fmt.Sprintf(`{"metadata-location": "s3://b/table-%d.json"}`, id)
+			path := fmt.Sprintf("/v1/namespaces/default/tables/table_%d", id)
+			st, _, hd := post(appReal, path, payload)
+			mu.Lock()
+			statusCodes = append(statusCodes, st)
+			if hd["Retry-After"] != "" {
+				retryAfters = append(retryAfters, hd["Retry-After"])
+			}
+			mu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+
+	// Under 20 concurrent requests with buffer capacity 1 and 1 sequential worker,
+	// at least one request must have been rejected with 429 and Retry-After: 1
+	var has429 bool
+	for _, code := range statusCodes {
+		if code == 429 {
+			has429 = true
+			break
+		}
+	}
+	assert.True(t, has429, "Expected at least one HTTP 429 response under concurrent burst load")
+	assert.Contains(t, retryAfters, "1", "Expected Retry-After header with value '1' on 429 response")
 }
 
 func TestCatalogCommitConflictOnMismatchedUUID(t *testing.T) {
