@@ -336,6 +336,8 @@ func TestMapIcebergTypeToDuckLake(t *testing.T) {
 		{"uuid", "uuid"},
 		{"binary", "blob"},
 		{"fixed", "blob"},
+		{"fixed[16]", "blob"},
+		{"fixed[32]", "blob"},
 		{"decimal(18, 4)", "decimal(18, 4)"},
 		{"custom_type", "custom_type"},
 	}

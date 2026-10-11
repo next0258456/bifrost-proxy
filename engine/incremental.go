@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // IcebergMetadata represents the essential Iceberg table metadata fields
@@ -82,7 +84,7 @@ func MapIcebergTypeToDuckLake(icebergType string) string {
 		return "timestamp"
 	case raw == "uuid":
 		return "uuid"
-	case raw == "binary" || raw == "fixed":
+	case raw == "binary" || strings.HasPrefix(raw, "fixed"):
 		return "blob"
 	case strings.HasPrefix(raw, "decimal"):
 		return raw
@@ -154,19 +156,24 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 
 	// Đảm bảo ducklake_schema đã tồn tại cho namespace
 	var schemaCount int
-	_ = e.db.QueryRow("SELECT count(*), COALESCE(MAX(schema_id), 0) FROM ducklake_catalog.ducklake_schema WHERE schema_name = $1;", schemaName).Scan(&schemaCount, &schemaID)
+	if err := e.db.QueryRow("SELECT count(*), COALESCE(MAX(schema_id), 0) FROM ducklake_catalog.ducklake_schema WHERE schema_name = $1;", schemaName).Scan(&schemaCount, &schemaID); err != nil {
+		log.Printf("Warning: failed to query ducklake_schema: %v", err)
+	}
 	if schemaCount == 0 {
 		var nextSchemaID int64 = 1
-		_ = e.db.QueryRow("SELECT COALESCE(MAX(schema_id), 0) + 1 FROM ducklake_catalog.ducklake_schema;").Scan(&nextSchemaID)
+		if err := e.db.QueryRow("SELECT COALESCE(MAX(schema_id), 0) + 1 FROM ducklake_catalog.ducklake_schema;").Scan(&nextSchemaID); err != nil {
+			return fmt.Errorf("failed to allocate next schema_id: %w", err)
+		}
 		schemaID = nextSchemaID
+		schemaUUID := uuid.New().String()
 		insertSchemaSQL := `
 			INSERT INTO ducklake_catalog.ducklake_schema 
 			(schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative)
-			VALUES ($1, '00000000-0000-0000-0000-000000000000', $2, NULL, $3, $4, true);
+			VALUES ($1, $2, $3, NULL, $4, $5, true);
 		`
 		schemaPath := fmt.Sprintf("%s/", schemaName)
-		if _, err := e.db.Exec(insertSchemaSQL, schemaID, snapshotID, schemaName, schemaPath); err != nil {
-			log.Printf("Warning: failed to insert ducklake_schema: %v", err)
+		if _, err := e.db.Exec(insertSchemaSQL, schemaID, schemaUUID, snapshotID, schemaName, schemaPath); err != nil {
+			return fmt.Errorf("failed to insert ducklake_schema for %s: %w", schemaName, err)
 		}
 	}
 
@@ -179,10 +186,12 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	if err != nil || tableCount == 0 {
 		log.Printf("Table %s chưa có trong DuckLake, đăng ký table metadata vào DuckLake...", task.Table)
 		var nextTblID int64 = 1
-		_ = e.db.QueryRow("SELECT COALESCE(MAX(table_id), 0) + 1 FROM ducklake_catalog.ducklake_table;").Scan(&nextTblID)
+		if err := e.db.QueryRow("SELECT COALESCE(MAX(table_id), 0) + 1 FROM ducklake_catalog.ducklake_table;").Scan(&nextTblID); err != nil {
+			return fmt.Errorf("failed to allocate next table_id: %w", err)
+		}
 		tableID = nextTblID
 
-		tableUUID := "00000000-0000-0000-0000-000000000000"
+		tableUUID := uuid.New().String()
 		if meta != nil && meta.TableUUID != "" {
 			tableUUID = meta.TableUUID
 		}
@@ -194,7 +203,7 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		`
 		tablePath := fmt.Sprintf("%s/", task.Table.Table)
 		if _, err := e.db.Exec(insertTableSQL, tableID, tableUUID, snapshotID, schemaID, task.Table.Table, tablePath); err != nil {
-			log.Printf("Warning: failed to insert ducklake_table: %v", err)
+			return fmt.Errorf("failed to insert ducklake_table: %w", err)
 		} else {
 			log.Printf("Đăng ký thành công table %s (table_id: %d, schema_id: %d) vào DuckLake PostgreSQL catalog", task.Table, tableID, schemaID)
 		}
@@ -203,7 +212,9 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	// 4. Ghi nhận snapshot mới vào ducklake_catalog.ducklake_snapshot
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	var snapExists int
-	_ = e.db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = $1;", snapshotID).Scan(&snapExists)
+	if err := e.db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = $1;", snapshotID).Scan(&snapExists); err != nil {
+		log.Printf("Warning: failed to check snapshot existence: %v", err)
+	}
 	if snapExists == 0 {
 		snapshotSQL := `
 			INSERT INTO ducklake_catalog.ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id)
@@ -239,10 +250,14 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	}
 
 	var nextFileID int64 = 1
-	_ = e.db.QueryRow("SELECT COALESCE(MAX(data_file_id), 0) + 1 FROM ducklake_catalog.ducklake_data_file;").Scan(&nextFileID)
+	if err := e.db.QueryRow("SELECT COALESCE(MAX(data_file_id), 0) + 1 FROM ducklake_catalog.ducklake_data_file;").Scan(&nextFileID); err != nil {
+		return fmt.Errorf("failed to allocate next data_file_id: %w", err)
+	}
 
 	var nextDeleteFileID int64 = 1
-	_ = e.db.QueryRow("SELECT COALESCE(MAX(delete_file_id), 0) + 1 FROM ducklake_catalog.ducklake_delete_file;").Scan(&nextDeleteFileID)
+	if err := e.db.QueryRow("SELECT COALESCE(MAX(delete_file_id), 0) + 1 FROM ducklake_catalog.ducklake_delete_file;").Scan(&nextDeleteFileID); err != nil {
+		return fmt.Errorf("failed to allocate next delete_file_id: %w", err)
+	}
 
 	for _, df := range dataFiles {
 		if df.Content == 0 { // 0 = Data file
