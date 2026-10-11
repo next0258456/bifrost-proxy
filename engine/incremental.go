@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -93,6 +94,16 @@ func MapIcebergTypeToDuckLake(icebergType string) string {
 	}
 }
 
+// allocateNextID generates the next incremental identifier for a catalog table
+func (e *SyncEngine) allocateNextID(table, idCol string) (int64, error) {
+	var nextID int64 = 1
+	query := fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) + 1 FROM ducklake_catalog.%s;", idCol, table)
+	if err := e.db.QueryRow(query).Scan(&nextID); err != nil {
+		return 0, fmt.Errorf("failed to allocate next %s for %s: %w", idCol, table, err)
+	}
+	return nextID, nil
+}
+
 // SyncDeltaIncremental synchronises one committed Iceberg snapshot into DuckLake.
 func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	log.Printf("Starting delta sync for %s (snapshot: %d)", task.Table, task.SnapshotID)
@@ -157,12 +168,12 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	// Đảm bảo ducklake_schema đã tồn tại cho namespace
 	var schemaCount int
 	if err := e.db.QueryRow("SELECT count(*), COALESCE(MAX(schema_id), 0) FROM ducklake_catalog.ducklake_schema WHERE schema_name = $1;", schemaName).Scan(&schemaCount, &schemaID); err != nil {
-		log.Printf("Warning: failed to query ducklake_schema: %v", err)
+		return fmt.Errorf("failed to query ducklake_schema for namespace %s: %w", schemaName, err)
 	}
 	if schemaCount == 0 {
-		var nextSchemaID int64 = 1
-		if err := e.db.QueryRow("SELECT COALESCE(MAX(schema_id), 0) + 1 FROM ducklake_catalog.ducklake_schema;").Scan(&nextSchemaID); err != nil {
-			return fmt.Errorf("failed to allocate next schema_id: %w", err)
+		nextSchemaID, err := e.allocateNextID("ducklake_schema", "schema_id")
+		if err != nil {
+			return err
 		}
 		schemaID = nextSchemaID
 		schemaUUID := uuid.New().String()
@@ -181,13 +192,16 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	var tableID int64 = 1
 	checkQuery := "SELECT count(*), COALESCE(MAX(table_id), 1) FROM ducklake_catalog.ducklake_table WHERE schema_id = $1 AND table_name = $2;"
 	err := e.db.QueryRow(checkQuery, schemaID, task.Table.Table).Scan(&tableCount, &tableID)
+	if err != nil {
+		return fmt.Errorf("failed to query ducklake_table for %s: %w", task.Table, err)
+	}
 
 	// Bảng chưa tồn tại trong DuckLake: bootstrap đăng ký table_id mới
-	if err != nil || tableCount == 0 {
+	if tableCount == 0 {
 		log.Printf("Table %s chưa có trong DuckLake, đăng ký table metadata vào DuckLake...", task.Table)
-		var nextTblID int64 = 1
-		if err := e.db.QueryRow("SELECT COALESCE(MAX(table_id), 0) + 1 FROM ducklake_catalog.ducklake_table;").Scan(&nextTblID); err != nil {
-			return fmt.Errorf("failed to allocate next table_id: %w", err)
+		nextTblID, err := e.allocateNextID("ducklake_table", "table_id")
+		if err != nil {
+			return err
 		}
 		tableID = nextTblID
 
@@ -213,7 +227,7 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
 	var snapExists int
 	if err := e.db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = $1;", snapshotID).Scan(&snapExists); err != nil {
-		log.Printf("Warning: failed to check snapshot existence: %v", err)
+		return fmt.Errorf("failed to check ducklake_snapshot existence for %d: %w", snapshotID, err)
 	}
 	if snapExists == 0 {
 		snapshotSQL := `
@@ -249,14 +263,14 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		}
 	}
 
-	var nextFileID int64 = 1
-	if err := e.db.QueryRow("SELECT COALESCE(MAX(data_file_id), 0) + 1 FROM ducklake_catalog.ducklake_data_file;").Scan(&nextFileID); err != nil {
-		return fmt.Errorf("failed to allocate next data_file_id: %w", err)
+	nextFileID, err := e.allocateNextID("ducklake_data_file", "data_file_id")
+	if err != nil {
+		return err
 	}
 
-	var nextDeleteFileID int64 = 1
-	if err := e.db.QueryRow("SELECT COALESCE(MAX(delete_file_id), 0) + 1 FROM ducklake_catalog.ducklake_delete_file;").Scan(&nextDeleteFileID); err != nil {
-		return fmt.Errorf("failed to allocate next delete_file_id: %w", err)
+	nextDeleteFileID, err := e.allocateNextID("ducklake_delete_file", "delete_file_id")
+	if err != nil {
+		return err
 	}
 
 	for _, df := range dataFiles {
@@ -273,9 +287,13 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		} else if df.Content == 1 { // 1 = Delete v2 (Position Deletes)
 			var refDataFileID int64 = 1
 			if df.ReferencedPath != "" {
-				_ = e.db.QueryRow("SELECT data_file_id FROM ducklake_catalog.ducklake_data_file WHERE path = $1 LIMIT 1;", df.ReferencedPath).Scan(&refDataFileID)
+				if err := e.db.QueryRow("SELECT data_file_id FROM ducklake_catalog.ducklake_data_file WHERE path = $1 LIMIT 1;", df.ReferencedPath).Scan(&refDataFileID); err != nil && err != sql.ErrNoRows {
+					return fmt.Errorf("failed to resolve refDataFileID for path %s: %w", df.ReferencedPath, err)
+				}
 			} else {
-				_ = e.db.QueryRow("SELECT COALESCE(MAX(data_file_id), 1) FROM ducklake_catalog.ducklake_data_file WHERE table_id = $1;", tableID).Scan(&refDataFileID)
+				if err := e.db.QueryRow("SELECT COALESCE(MAX(data_file_id), 1) FROM ducklake_catalog.ducklake_data_file WHERE table_id = $1;", tableID).Scan(&refDataFileID); err != nil && err != sql.ErrNoRows {
+					return fmt.Errorf("failed to query fallback refDataFileID for table_id %d: %w", tableID, err)
+				}
 			}
 
 			deleteFileSQL := `

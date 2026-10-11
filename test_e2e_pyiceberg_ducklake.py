@@ -145,8 +145,8 @@ def test_e2e_write_pyiceberg_read_ducklake():
     iceberg_rows = iceberg_conn.execute(
         f"SELECT order_id, customer_name, amount, tax, created_at FROM iceberg_scan('{metadata_location}') ORDER BY order_id;"
     ).fetchall()
-    for row in iceberg_rows:
-        print(f"    [Iceberg] Order #{row[0]}: {row[1]} | Price: ${row[2]} | Tax: ${row[3]} | Time: {row[4]}")
+    for order_id, customer_name, amount, tax, created_at in iceberg_rows:
+        print(f"    [Iceberg] Order #{order_id}: {customer_name} | Price: ${amount} | Tax: ${tax} | Time: {created_at}")
     iceberg_conn.close()
 
     # 4.2. Query Path 2: PURE NATIVE DUCKLAKE (ATTACH ducklake:postgres & direct table query, NO iceberg_scan)
@@ -192,8 +192,8 @@ def test_e2e_write_pyiceberg_read_ducklake():
             pass
         time.sleep(0.1)
 
-    for row in ducklake_rows:
-        print(f"    [DuckLake] Order #{row[0]}: {row[1]} | Price: ${row[2]} | Tax: ${row[3]} | Time: {row[4]}")
+    for order_id, customer_name, amount, tax, created_at in ducklake_rows:
+        print(f"    [DuckLake] Order #{order_id}: {customer_name} | Price: ${amount} | Tax: ${tax} | Time: {created_at}")
     pure_ducklake_reader.close()
 
     assert len(ducklake_rows) == 3, f"Unexpected DuckLake row count: {len(ducklake_rows)}"
