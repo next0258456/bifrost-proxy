@@ -4,9 +4,9 @@
 
 **Blocked by:** Master-04: Real Iceberg Manifest Delta Parsing & DuckLake Inserts
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Trích xuất các trường cột thật từ `IcebergMetadata.Schemas` và chèn vào `ducklake_catalog.ducklake_column` với `start_snapshot`.
-- [ ] Xử lý file position delete (`content = 1`), đọc field `2147483546` để liên kết với `ducklake_data_file.data_file_id`.
-- [ ] Chèn file delete thật vào `ducklake_catalog.ducklake_delete_file`.
-- [ ] Xóa bỏ hoàn toàn các cột hardcode mẫu.
+- [x] Trích xuất các trường cột thật từ `IcebergMetadata.Schemas` và chèn vào `ducklake_catalog.ducklake_column` với `start_snapshot`.
+- [x] Xử lý file position delete (`content = 1`), đọc field `2147483546` để liên kết với `ducklake_data_file.data_file_id`.
+- [x] Chèn file delete thật vào `ducklake_catalog.ducklake_delete_file`.
+- [x] Xóa bỏ hoàn toàn các cột hardcode mẫu.
