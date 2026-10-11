@@ -8,13 +8,13 @@ E2E Integration Test:
 import os
 import time
 import tempfile
-import pathlib
+from decimal import Decimal
 import requests
 import pyarrow as pa
 import duckdb
 from pyiceberg.catalog.sql import SqlCatalog
 from pyiceberg.schema import Schema
-from pyiceberg.types import NestedField, LongType, StringType, DoubleType
+from pyiceberg.types import NestedField, LongType, StringType, DoubleType, TimestampType, DecimalType
 
 
 # Cấu hình môi trường S3 / MinIO & Bifrost Proxy
@@ -58,11 +58,13 @@ def test_e2e_write_pyiceberg_read_ducklake():
     except Exception:
         pass
 
-    # Schema definition
+    # Schema definition with rich types (including Timestamp and Decimal)
     schema = Schema(
         NestedField(field_id=1, name="order_id", field_type=LongType(), required=False),
         NestedField(field_id=2, name="customer_name", field_type=StringType(), required=False),
         NestedField(field_id=3, name="amount", field_type=DoubleType(), required=False),
+        NestedField(field_id=4, name="created_at", field_type=TimestampType(), required=False),
+        NestedField(field_id=5, name="tax", field_type=DecimalType(precision=10, scale=2), required=False),
     )
 
     try:
@@ -83,6 +85,8 @@ def test_e2e_write_pyiceberg_read_ducklake():
             pa.array([101, 102, 103], type=pa.int64()),
             pa.array(["CongAnh", "Bifrost", "DuckLake"], type=pa.string()),
             pa.array([250.50, 999.99, 12.00], type=pa.float64()),
+            pa.array([1700000000000000, 1700000001000000, 1700000002000000], type=pa.timestamp('us')),
+            pa.array([Decimal("25.05"), Decimal("99.99"), Decimal("1.20")], type=pa.decimal128(10, 2)),
         ],
         schema=schema.as_arrow(),
     )
@@ -139,10 +143,10 @@ def test_e2e_write_pyiceberg_read_ducklake():
         );
     """)
     iceberg_rows = iceberg_conn.execute(
-        f"SELECT order_id, customer_name, amount FROM iceberg_scan('{metadata_location}') ORDER BY order_id;"
+        f"SELECT order_id, customer_name, amount, tax FROM iceberg_scan('{metadata_location}') ORDER BY order_id;"
     ).fetchall()
     for row in iceberg_rows:
-        print(f"    [Iceberg] Order #{row[0]}: {row[1]} | Price: ${row[2]}")
+        print(f"    [Iceberg] Order #{row[0]}: {row[1]} | Price: ${row[2]} | Tax: ${row[3]}")
     iceberg_conn.close()
 
     # 4.2. Query Path 2: PURE NATIVE DUCKLAKE (ATTACH ducklake:postgres & direct table query, NO iceberg_scan)
@@ -150,7 +154,6 @@ def test_e2e_write_pyiceberg_read_ducklake():
     print("        -> Reading DuckLake metadata directly streamed into PostgreSQL by Bifrost Proxy...")
 
     # Dedicated PURE DuckLake Reader connection:
-    # Completely independent reader querying DuckLake catalog directly via PostgreSQL!
     pure_ducklake_reader = duckdb.connect()
     pure_ducklake_reader.execute("INSTALL ducklake; LOAD ducklake;")
     pure_ducklake_reader.execute("INSTALL postgres; LOAD postgres;")
@@ -167,21 +170,30 @@ def test_e2e_write_pyiceberg_read_ducklake():
         );
     """)
 
-    # Give asynchronous ingestion queue worker a moment to finalize delta execution
-    time.sleep(1.0)
-
     # Attach DuckLake from Postgres backend!
     pure_ducklake_reader.execute(f"""
         ATTACH 'ducklake:postgres:dbname=polaris host=localhost port=5432 user=admin password=password' 
         AS prod_lake (DATA_PATH 's3://lakehouse/{namespace}/', OVERRIDE_DATA_PATH true);
     """)
 
-    print(f"        -> Executing pure SQL: SELECT * FROM prod_lake.{table_name};")
-    ducklake_rows = pure_ducklake_reader.execute(
-        f"SELECT order_id, customer_name, amount FROM prod_lake.{table_name} ORDER BY order_id;"
-    ).fetchall()
+    # Deterministic polling: poll until table is visible and populated by async worker
+    print(f"        -> Deterministic polling for prod_lake.{namespace}.{table_name}...")
+    ducklake_rows = []
+    max_retries = 30
+    for attempt in range(max_retries):
+        try:
+            ducklake_rows = pure_ducklake_reader.execute(
+                f"SELECT order_id, customer_name, amount, tax FROM prod_lake.{namespace}.{table_name} ORDER BY order_id;"
+            ).fetchall()
+            if len(ducklake_rows) == len(iceberg_rows):
+                print(f"        -> Table query resolved successfully on attempt {attempt+1}!")
+                break
+        except Exception:
+            pass
+        time.sleep(0.1)
+
     for row in ducklake_rows:
-        print(f"    [DuckLake] Order #{row[0]}: {row[1]} | Price: ${row[2]}")
+        print(f"    [DuckLake] Order #{row[0]}: {row[1]} | Price: ${row[2]} | Tax: ${row[3]}")
     pure_ducklake_reader.close()
 
     assert len(ducklake_rows) == 3, f"Unexpected DuckLake row count: {len(ducklake_rows)}"
