@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Viết logic parse delta manifest từ S3/MinIO để rút trích danh sách file Parquet mới.
-- [ ] Loại bỏ hằng số giả lập trong `engine/incremental.go`.
-- [ ] Thực thi câu lệnh SQL `INSERT INTO ducklake_catalog.ducklake_data_file` với path, record count, file size thật.
-- [ ] Viết test xác nhận dữ liệu trong `ducklake_data_file` khớp với file Parquet thực tế.
+- [x] Viết logic parse delta manifest từ S3/MinIO để rút trích danh sách file Parquet mới.
+- [x] Loại bỏ hằng số giả lập trong `engine/incremental.go`.
+- [x] Thực thi câu lệnh SQL `INSERT INTO ducklake_catalog.ducklake_data_file` với path, record count, file size thật.
+- [x] Viết test xác nhận dữ liệu trong `ducklake_data_file` khớp với file Parquet thực tế.

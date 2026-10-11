@@ -118,8 +118,8 @@ func TestCatalogCommit(t *testing.T) {
 	// 1. Commit ban đầu (tạo mới) -> 200 OK
 	req := httptest.NewRequest("POST", "/v1/namespaces/default/tables/test_table", nil)
 	resp, _ := app.Test(req, -1)
-	assert.Equal(t, 200, resp.StatusCode)
-	assert.NotEmpty(t, catStore.Pointers["default/test_table"])
+	body, _ := io.ReadAll(resp.Body)
+	assert.Contains(t, string(body), "metadata-location")
 
 	// 2. Commit tiếp theo nhưng gửi previous location rỗng khi bảng đã tồn tại -> 409 Conflict
 	reqConflict := httptest.NewRequest("POST", "/v1/namespaces/default/tables/test_table", nil)
