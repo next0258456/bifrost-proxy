@@ -1,0 +1,21 @@
+# Binaries
+/bifrost-proxy
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+
+# Scratch dumps and diffs
+*.txt
+*.html
+.scratch/*.txt
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

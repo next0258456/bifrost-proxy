@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Viết hàm bóc tách manifest delta từ `metadata.json` lấy danh sách data files mới (`added_data_files`) và số dòng `record_count`.
-- [ ] Viết câu lệnh SQL Insert delta vào bảng `ducklake_snapshot` và `ducklake_data_file`.
-- [ ] Ghi nhận nhật ký thay đổi snapshot vào `ducklake_snapshot_changes`.
-- [ ] Viết Integration test xác nhận việc chèn 1 dòng mới chỉ sinh ra đúng 1 record tương ứng trong `ducklake_data_file`.
+- [x] Viết hàm bóc tách manifest delta từ `metadata.json` lấy danh sách data files mới (`added_data_files`) và số dòng `record_count`.
+- [x] Viết câu lệnh SQL Insert delta vào bảng `ducklake_snapshot` và `ducklake_data_file`.
+- [x] Ghi nhận nhật ký thay đổi snapshot vào `ducklake_snapshot_changes`.
+- [x] Viết Integration test xác nhận việc chèn 1 dòng mới chỉ sinh ra đúng 1 record tương ứng trong `ducklake_data_file`.

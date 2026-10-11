@@ -2,11 +2,14 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var ErrCommitConflict = errors.New("commit conflict: table pointer has changed or table already exists")
 
 type CatalogStore interface {
 	GetTablePointer(ctx context.Context, namespace, table string) (string, error)
@@ -60,15 +63,42 @@ func (s *PostgresCatalogStore) GetTablePointer(ctx context.Context, namespace, t
 	return metadataLocation, nil
 }
 
+// SaveTablePointer executes atomic Compare-And-Swap (CAS) update
 func (s *PostgresCatalogStore) SaveTablePointer(ctx context.Context, namespace, table, metadataLocation, previousLocation string) error {
-	query := `
-	INSERT INTO catalog_tables (namespace, table_name, metadata_location, previous_metadata_location, updated_at)
-	VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-	ON CONFLICT (namespace, table_name) DO UPDATE
-	SET metadata_location = EXCLUDED.metadata_location,
-	    previous_metadata_location = EXCLUDED.previous_metadata_location,
-	    updated_at = EXCLUDED.updated_at
+	if previousLocation == "" {
+		// Tạo mới bảng: chỉ thành công nếu bảng chưa từng tồn tại
+		insertQuery := `
+		INSERT INTO catalog_tables (namespace, table_name, metadata_location, previous_metadata_location, updated_at)
+		VALUES ($1, $2, $3, '', CURRENT_TIMESTAMP)
+		ON CONFLICT (namespace, table_name) DO NOTHING;
+		`
+		tag, err := s.pool.Exec(ctx, insertQuery, namespace, table, metadataLocation)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			// Bảng đã tồn tại nhưng client lại gửi previousLocation rỗng -> xung đột
+			return ErrCommitConflict
+		}
+		return nil
+	}
+
+	// Cập nhật bảng hiện có: chỉ thành công khi con trỏ hiện tại đúng bằng previousLocation (CAS)
+	updateQuery := `
+	UPDATE catalog_tables
+	SET metadata_location = $1,
+	    previous_metadata_location = $2,
+	    updated_at = CURRENT_TIMESTAMP
+	WHERE namespace = $3
+	  AND table_name = $4
+	  AND metadata_location = $2;
 	`
-	_, err := s.pool.Exec(ctx, query, namespace, table, metadataLocation, previousLocation)
-	return err
+	tag, err := s.pool.Exec(ctx, updateQuery, metadataLocation, previousLocation, namespace, table)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrCommitConflict
+	}
+	return nil
 }

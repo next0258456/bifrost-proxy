@@ -14,6 +14,12 @@ type CommitTask struct {
 	SnapshotID       int64
 }
 
+// QueueService defines the interface for task submission
+type QueueService interface {
+	Submit(task CommitTask) bool
+	Stop()
+}
+
 // IngestionQueue manages a bounded buffer channel and sequential worker pool
 type IngestionQueue struct {
 	taskChan chan CommitTask
