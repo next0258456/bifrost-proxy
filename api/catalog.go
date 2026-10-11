@@ -62,9 +62,28 @@ func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogSto
 			_ = store.SaveTableMetadata(c.Context(), ns, table, c.Body())
 		}
 
-		// Bước 1: GHI ĐỒNG BỘ VÀO POSTGRES (< 2ms)
+		previousLocation, _ := payload["previous-metadata-location"].(string)
+
+		// Bước 1: GHI ĐỒNG BỘ VÀO POSTGRES CÓ KIỂM TRA CAS (< 2ms)
 		if catalogStore != nil {
-			_ = catalogStore.SaveTablePointer(c.Context(), ns, table, metadataPath, "")
+			if err := catalogStore.SaveTablePointer(c.Context(), ns, table, metadataPath, previousLocation); err != nil {
+				if err == storage.ErrCommitConflict {
+					return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+						"error": fiber.Map{
+							"message": "Commit failed: table pointer conflict or concurrent update",
+							"type":    "CommitFailedException",
+							"code":    409,
+						},
+					})
+				}
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error": fiber.Map{
+						"message": err.Error(),
+						"type":    "InternalServerError",
+						"code":    500,
+					},
+				})
+			}
 		}
 
 		// Bước 2: KÍCH HOẠT ĐỒNG BỘ DUCKLAKE BẤT ĐỒNG BỘ QUA QUEUE (Ticket Sync-02)

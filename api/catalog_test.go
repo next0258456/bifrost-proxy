@@ -50,6 +50,17 @@ func (m *MockCatalogStore) GetTablePointer(ctx context.Context, namespace, table
 
 func (m *MockCatalogStore) SaveTablePointer(ctx context.Context, namespace, table, metadataLocation, previousLocation string) error {
 	key := namespace + "/" + table
+	curr, exists := m.Pointers[key]
+	if previousLocation == "" {
+		if exists {
+			return storage.ErrCommitConflict
+		}
+		m.Pointers[key] = metadataLocation
+		return nil
+	}
+	if curr != previousLocation {
+		return storage.ErrCommitConflict
+	}
 	m.Pointers[key] = metadataLocation
 	return nil
 }
@@ -96,10 +107,14 @@ func TestCatalogCommit(t *testing.T) {
 
 	api.SetupCatalogRoutes(app, store, catStore, queue)
 
+	// 1. Commit ban đầu (tạo mới) -> 200 OK
 	req := httptest.NewRequest("POST", "/v1/namespaces/default/tables/test_table", nil)
 	resp, _ := app.Test(req, -1)
 	assert.Equal(t, 200, resp.StatusCode)
-
-	// Verify that the table pointer was synchronously saved into the catalog store
 	assert.NotEmpty(t, catStore.Pointers["default/test_table"])
+
+	// 2. Commit tiếp theo nhưng gửi previous location rỗng khi bảng đã tồn tại -> 409 Conflict
+	reqConflict := httptest.NewRequest("POST", "/v1/namespaces/default/tables/test_table", nil)
+	respConflict, _ := app.Test(reqConflict, -1)
+	assert.Equal(t, 409, respConflict.StatusCode)
 }

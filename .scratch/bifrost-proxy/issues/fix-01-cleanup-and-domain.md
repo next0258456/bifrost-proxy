@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Chạy `git rm` xóa các file diff và html rác khỏi git index.
-- [ ] Cập nhật `.gitignore` để loại trừ vĩnh viễn các file `*.txt`, `*.html` rác trong root.
-- [ ] Định nghĩa `TableIdentifier` trong package `storage` hoặc `domain`.
-- [ ] Thống nhất hàm `getEnv` duy nhất, đồng bộ default S3 (`minio:9000` hoặc `localhost:9000`).
+- [x] Chạy `git rm` xóa các file diff và html rác khỏi git index.
+- [x] Cập nhật `.gitignore` để loại trừ vĩnh viễn các file `*.txt`, `*.html` rác trong root.
+- [x] Định nghĩa `TableIdentifier` trong package `storage` hoặc `domain`.
+- [x] Thống nhất hàm `getEnv` duy nhất, đồng bộ default S3 (`minio:9000` hoặc `localhost:9000`).
