@@ -56,6 +56,41 @@ type DataFileEntry struct {
 	ReferencedPath  string `json:"referenced_path,omitempty"` // field 2147483546
 }
 
+// MapIcebergTypeToDuckLake converts standard Iceberg schema data types to DuckLake SQL types
+func MapIcebergTypeToDuckLake(icebergType string) string {
+	raw := strings.ToLower(strings.TrimSpace(icebergType))
+	switch {
+	case raw == "long" || raw == "bigint":
+		return "int64"
+	case raw == "int" || raw == "integer":
+		return "int32"
+	case raw == "short":
+		return "int16"
+	case raw == "string" || raw == "varchar":
+		return "varchar"
+	case raw == "double":
+		return "float64"
+	case raw == "float":
+		return "float32"
+	case raw == "boolean":
+		return "boolean"
+	case raw == "date":
+		return "date"
+	case raw == "time":
+		return "time"
+	case raw == "timestamp" || raw == "timestamptz" || strings.HasPrefix(raw, "timestamp"):
+		return "timestamp"
+	case raw == "uuid":
+		return "uuid"
+	case raw == "binary" || raw == "fixed":
+		return "blob"
+	case strings.HasPrefix(raw, "decimal"):
+		return raw
+	default:
+		return raw
+	}
+}
+
 // SyncDeltaIncremental synchronises one committed Iceberg snapshot into DuckLake.
 func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	log.Printf("Starting delta sync for %s (snapshot: %d)", task.Table, task.SnapshotID)
@@ -110,11 +145,35 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		operation = targetSnap.Summary.Operation
 	}
 
-	// 3. Kiểm tra xem bảng đã tồn tại trong DuckLake chưa
+	// 3. Kiểm tra xem bảng đã tồn tại trong DuckLake chưa (theo namespace schema)
+	schemaID := int64(0)
+	schemaName := task.Table.Namespace
+	if schemaName == "" {
+		schemaName = "main"
+	}
+
+	// Đảm bảo ducklake_schema đã tồn tại cho namespace
+	var schemaCount int
+	_ = e.db.QueryRow("SELECT count(*), COALESCE(MAX(schema_id), 0) FROM ducklake_catalog.ducklake_schema WHERE schema_name = $1;", schemaName).Scan(&schemaCount, &schemaID)
+	if schemaCount == 0 {
+		var nextSchemaID int64 = 1
+		_ = e.db.QueryRow("SELECT COALESCE(MAX(schema_id), 0) + 1 FROM ducklake_catalog.ducklake_schema;").Scan(&nextSchemaID)
+		schemaID = nextSchemaID
+		insertSchemaSQL := `
+			INSERT INTO ducklake_catalog.ducklake_schema 
+			(schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative)
+			VALUES ($1, '00000000-0000-0000-0000-000000000000', $2, NULL, $3, $4, true);
+		`
+		schemaPath := fmt.Sprintf("%s/", schemaName)
+		if _, err := e.db.Exec(insertSchemaSQL, schemaID, snapshotID, schemaName, schemaPath); err != nil {
+			log.Printf("Warning: failed to insert ducklake_schema: %v", err)
+		}
+	}
+
 	var tableCount int
 	var tableID int64 = 1
-	checkQuery := "SELECT count(*), COALESCE(MAX(table_id), 1) FROM ducklake_catalog.ducklake_table WHERE table_name = $1;"
-	err := e.db.QueryRow(checkQuery, task.Table.Table).Scan(&tableCount, &tableID)
+	checkQuery := "SELECT count(*), COALESCE(MAX(table_id), 1) FROM ducklake_catalog.ducklake_table WHERE schema_id = $1 AND table_name = $2;"
+	err := e.db.QueryRow(checkQuery, schemaID, task.Table.Table).Scan(&tableCount, &tableID)
 
 	// Bảng chưa tồn tại trong DuckLake: bootstrap đăng ký table_id mới
 	if err != nil || tableCount == 0 {
@@ -131,13 +190,13 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		insertTableSQL := `
 			INSERT INTO ducklake_catalog.ducklake_table 
 			(table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative)
-			VALUES ($1, $2, $3, NULL, 0, $4, $5, true);
+			VALUES ($1, $2, $3, NULL, $4, $5, $6, true);
 		`
 		tablePath := fmt.Sprintf("%s/", task.Table.Table)
-		if _, err := e.db.Exec(insertTableSQL, tableID, tableUUID, snapshotID, task.Table.Table, tablePath); err != nil {
+		if _, err := e.db.Exec(insertTableSQL, tableID, tableUUID, snapshotID, schemaID, task.Table.Table, tablePath); err != nil {
 			log.Printf("Warning: failed to insert ducklake_table: %v", err)
 		} else {
-			log.Printf("Đăng ký thành công table %s (table_id: %d) vào DuckLake PostgreSQL catalog", task.Table, tableID)
+			log.Printf("Đăng ký thành công table %s (table_id: %d, schema_id: %d) vào DuckLake PostgreSQL catalog", task.Table, tableID, schemaID)
 		}
 	}
 
@@ -246,22 +305,7 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		for orderIdx, f := range activeSchema.Fields {
 			newCols[f.ID] = true
 			if !activeCols[f.ID] {
-				// Chuẩn hóa kiểu dữ liệu từ Iceberg sang DuckLake / DuckDB type
-				duckType := strings.ToLower(f.Type)
-				switch duckType {
-				case "long":
-					duckType = "int64"
-				case "string":
-					duckType = "varchar"
-				case "double":
-					duckType = "float64"
-				case "int", "integer":
-					duckType = "int32"
-				case "float":
-					duckType = "float32"
-				case "boolean":
-					duckType = "boolean"
-				}
+				duckType := MapIcebergTypeToDuckLake(f.Type)
 
 				columnSQL := `
 					INSERT INTO ducklake_catalog.ducklake_column 
@@ -290,11 +334,13 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	}
 
 	// 6. Ghi nhận sự kiện delta thật vào ducklake_catalog.ducklake_snapshot_changes (5 cột)
+	commitMsg := fmt.Sprintf("Commit snapshot %d (%s) for table %s", snapshotID, operation, task.Table)
 	changeSQL := `
 		INSERT INTO ducklake_catalog.ducklake_snapshot_changes 
-		VALUES ($1, $2, NULL, NULL, NULL);
+		(snapshot_id, changes_made, author, commit_message, commit_extra_info)
+		VALUES ($1, $2, 'bifrost-proxy', $3, NULL);
 	`
-	if _, err := e.db.Exec(changeSQL, snapshotID, operation); err != nil {
+	if _, err := e.db.Exec(changeSQL, snapshotID, operation, commitMsg); err != nil {
 		return fmt.Errorf("failed to insert snapshot change into ducklake: %w", err)
 	}
 

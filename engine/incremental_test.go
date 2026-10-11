@@ -165,13 +165,15 @@ func TestSyncDeltaIncrementalDirectExecution(t *testing.T) {
 	// Initialize mock DuckLake catalog schema and tables
 	_, err = db.Exec(`
 		CREATE SCHEMA IF NOT EXISTS ducklake_catalog;
-		CREATE TABLE ducklake_catalog.ducklake_table (table_id BIGINT, table_name VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_schema (schema_id BIGINT, schema_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_table (table_id BIGINT, table_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, table_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
 		CREATE TABLE ducklake_catalog.ducklake_snapshot (snapshot_id BIGINT, snapshot_time VARCHAR, schema_version INT, next_catalog_id INT, next_file_id INT);
 		CREATE TABLE ducklake_catalog.ducklake_data_file (data_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, partition_id INT);
 		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
 		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
-		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, operation VARCHAR, c3 VARCHAR, c4 VARCHAR, c5 VARCHAR);
-		INSERT INTO ducklake_catalog.ducklake_table VALUES (1, 'sales');
+		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+		INSERT INTO ducklake_catalog.ducklake_schema VALUES (1, '00000000-0000-0000-0000-000000000000', 0, NULL, 'bronze', 'bronze/', true);
+		INSERT INTO ducklake_catalog.ducklake_table VALUES (1, 'uuid-sales', 0, NULL, 1, 'sales', 'sales/', true);
 	`)
 	require.NoError(t, err)
 
@@ -301,6 +303,48 @@ func TestSyncDeltaIncrementalDirectExecution(t *testing.T) {
 	err = db.QueryRow("SELECT begin_snapshot FROM ducklake_catalog.ducklake_column WHERE table_id = 1 AND column_id = 3 AND end_snapshot IS NULL;").Scan(&beginSnap)
 	require.NoError(t, err)
 	assert.Equal(t, int64(5002), beginSnap)
+
+	// Verify Audit info in ducklake_snapshot_changes
+	var author, changesMade, commitMsg string
+	err = db.QueryRow("SELECT author, changes_made, commit_message FROM ducklake_catalog.ducklake_snapshot_changes WHERE snapshot_id = 5002;").Scan(&author, &changesMade, &commitMsg)
+	require.NoError(t, err)
+	assert.Equal(t, "bifrost-proxy", author)
+	assert.Equal(t, "append", changesMade)
+	assert.Contains(t, commitMsg, "Commit snapshot 5002")
 }
+
+func TestMapIcebergTypeToDuckLake(t *testing.T) {
+	testCases := []struct {
+		input    string
+		expected string
+	}{
+		{"long", "int64"},
+		{"bigint", "int64"},
+		{"int", "int32"},
+		{"integer", "int32"},
+		{"short", "int16"},
+		{"string", "varchar"},
+		{"varchar", "varchar"},
+		{"double", "float64"},
+		{"float", "float32"},
+		{"boolean", "boolean"},
+		{"date", "date"},
+		{"time", "time"},
+		{"timestamp", "timestamp"},
+		{"timestamptz", "timestamp"},
+		{"timestamp with time zone", "timestamp"},
+		{"uuid", "uuid"},
+		{"binary", "blob"},
+		{"fixed", "blob"},
+		{"decimal(18, 4)", "decimal(18, 4)"},
+		{"custom_type", "custom_type"},
+	}
+
+	for _, tc := range testCases {
+		actual := engine.MapIcebergTypeToDuckLake(tc.input)
+		assert.Equal(t, tc.expected, actual, "Type mapping mismatch for: %s", tc.input)
+	}
+}
+
 
 
