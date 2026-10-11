@@ -4,10 +4,10 @@
 
 **Blocked by:** Master-03: Strict Iceberg CAS Requirements Validation in Postgres
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Worker tải `metadata.json` thật từ MinIO qua `StorageService.GetMetadataByLocation`.
-- [ ] Parse `IcebergMetadata` và trích xuất danh sách snapshot và summary delta.
-- [ ] Chèn các file Parquet THẬT vào `ducklake_catalog.ducklake_data_file`.
-- [ ] Ghi nhận sự kiện delta thật vào `ducklake_catalog.ducklake_snapshot_changes`.
-- [ ] Xóa bỏ hoàn toàn việc tự sinh đường dẫn mẫu và hằng số hardcode.
+- [x] Worker tải `metadata.json` thật từ MinIO qua `StorageService.GetMetadataByLocation`.
+- [x] Parse `IcebergMetadata` và trích xuất danh sách snapshot và summary delta.
+- [x] Chèn các file Parquet THẬT vào `ducklake_catalog.ducklake_data_file`.
+- [x] Ghi nhận sự kiện delta thật vào `ducklake_catalog.ducklake_snapshot_changes`.
+- [x] Xóa bỏ hoàn toàn việc tự sinh đường dẫn mẫu và hằng số hardcode.
