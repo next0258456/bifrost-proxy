@@ -9,7 +9,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Phân tích file manifest tìm các delete files (`content = 1`), trích xuất field `2147483546` lấy `referenced_data_file_id`.
-- [ ] Ghi nhận vào bảng `ducklake_delete_file` liên kết với data file gốc.
-- [ ] Xử lý schema changes: Thêm dòng mới vào `ducklake_column` khi thêm cột, update `end_snapshot` khi xóa cột.
-- [ ] Viết test End-to-End: Thao tác DELETE và ALTER TABLE từ Postgres được phản ánh chính xác trong các bảng metadata của DuckLake.
+- [x] Phân tích file manifest tìm các delete files (`content = 1`), trích xuất field `2147483546` lấy `referenced_data_file_id`.
+- [x] Ghi nhận vào bảng `ducklake_delete_file` liên kết với data file gốc.
+- [x] Xử lý schema changes: Thêm dòng mới vào `ducklake_column` khi thêm cột, update `end_snapshot` khi xóa cột.
+- [x] Viết test End-to-End: Thao tác DELETE và ALTER TABLE từ Postgres được phản ánh chính xác trong các bảng metadata của DuckLake.

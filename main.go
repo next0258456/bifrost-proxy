@@ -26,7 +26,7 @@ func main() {
 	})
 
 	// 1. MinIO / S3 Storage setup
-	endpoint := getEnv("S3_ENDPOINT", "localhost:9000")
+	endpoint := getEnv("S3_ENDPOINT", "minio:9000")
 	accessKey := getEnv("AWS_ACCESS_KEY_ID", "admin")
 	secretKey := getEnv("AWS_SECRET_ACCESS_KEY", "password")
 	bucket := getEnv("S3_BUCKET", "lakehouse")
