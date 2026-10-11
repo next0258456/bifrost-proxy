@@ -42,6 +42,7 @@ func (m *fakeStorage) SaveTableMetadata(ctx context.Context, id domain.TableIden
 // fakeCatalog is an in-memory catalog pointer store honouring CAS semantics.
 // fakeCatalog is an in-memory catalog pointer store honouring CAS semantics and Iceberg requirements.
 type fakeCatalog struct {
+	mu        sync.RWMutex
 	pointers  map[string]string
 	uuids     map[string]string
 	snapshots map[string]int64
@@ -61,6 +62,8 @@ func newFakeCatalog(pointers map[string]string) *fakeCatalog {
 }
 
 func (m *fakeCatalog) GetTablePointer(ctx context.Context, id domain.TableIdentifier) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	ptr, ok := m.pointers[id.String()]
 	if !ok {
 		return "", storage.ErrTableNotFound
@@ -69,6 +72,8 @@ func (m *fakeCatalog) GetTablePointer(ctx context.Context, id domain.TableIdenti
 }
 
 func (m *fakeCatalog) ValidateRequirements(ctx context.Context, id domain.TableIdentifier, reqs []domain.TableRequirement) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	key := id.String()
 	_, exists := m.pointers[key]
 	for _, req := range reqs {
@@ -124,6 +129,8 @@ func (m *fakeCatalog) ValidateRequirements(ctx context.Context, id domain.TableI
 }
 
 func (m *fakeCatalog) SaveTableCommit(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string, tableUUID string, snapshotID *int64, schemaID *int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	key := id.String()
 	curr, exists := m.pointers[key]
 	if previousLocation == "" && exists {

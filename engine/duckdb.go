@@ -53,10 +53,8 @@ func NewSyncEngine(cfg *config.Config, store storage.StorageService) (*SyncEngin
 	}
 
 	// Đính kèm trực tiếp DuckLake Catalog vào PostgreSQL làm single source of truth cho metadata!
-	// Cú pháp: ATTACH 'ducklake:postgres:...' AS ducklake_catalog
-	pgCatalogSQL := fmt.Sprintf(
-		"ATTACH 'dbname=polaris host=postgres port=5432 user=admin password=password' AS ducklake_catalog (TYPE POSTGRES);",
-	)
+	// DuckDB Postgres extension chấp nhận trực tiếp URI libpq hoặc connection string chuẩn
+	pgCatalogSQL := fmt.Sprintf("ATTACH '%s' AS ducklake_catalog (TYPE POSTGRES);", cfg.PGConnString)
 	_, err = db.Exec(pgCatalogSQL)
 	if err != nil {
 		log.Printf("Warning: failed to attach PostgreSQL as ducklake_catalog: %v", err)
@@ -80,22 +78,4 @@ func (e *SyncEngine) Close() {
 	if e.db != nil {
 		e.db.Close()
 	}
-}
-
-// SyncToDuckLake triggers the C++ iceberg_to_ducklake routine.
-// Cực kỳ cẩn thận: Hàm này sẽ dùng sức mạnh của DuckDB Iceberg extension để parse toàn bộ
-// Manifest List, Manifest (định dạng Avro) và quét các file Parquet để tạo cấu trúc DuckLake tối ưu nhất.
-func (e *SyncEngine) SyncToDuckLake(metadataLocation string) error {
-	log.Printf("DuckDB is starting deep sync via iceberg_to_ducklake from: %s", metadataLocation)
-	
-	// Thực thi table function `iceberg_to_ducklake(iceberg_metadata, target_ducklake_catalog)`
-	query := fmt.Sprintf(`CALL iceberg_to_ducklake('%s', 'ducklake_catalog');`, metadataLocation)
-	_, err := e.db.Exec(query)
-	if err != nil {
-		log.Printf("Error: SyncToDuckLake failed during Avro mapping: %v", err)
-		return err
-	}
-	
-	log.Println("DuckDB successfully synced entire Iceberg Avro tree to DuckLake!")
-	return nil
 }
