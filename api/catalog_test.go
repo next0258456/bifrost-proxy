@@ -249,12 +249,31 @@ func TestCatalogCommitRejectsBadPayload(t *testing.T) {
 }
 
 func TestCatalogCommitSaturatedQueueReturns429WithRetryAfter(t *testing.T) {
-	app := newApp(nil, map[string]string{}, &recordingQueue{full: true})
-
-	status, body, headers := post(app, "/v1/namespaces/default/tables/t", `{"metadata-location": "s3://b/v1.json"}`)
+	// 1. Simulated queue saturation check
+	appSim := newApp(nil, map[string]string{}, &recordingQueue{full: true})
+	status, body, headers := post(appSim, "/v1/namespaces/default/tables/t", `{"metadata-location": "s3://b/v1.json"}`)
 	assert.Equal(t, 429, status)
 	assert.Equal(t, "1", headers["Retry-After"])
 	assert.Contains(t, body, "QueueSaturatedException")
+
+	// 2. Real buffered channel saturation check
+	// Using a custom queue holding a real buffered channel (buffer size 1) without workers draining it,
+	// or stopping the worker first so tasks remain in the buffer.
+	realQueue := engine.NewIngestionQueue(nil, 1)
+	// Stop worker immediately so tasks won't be drained from taskChan
+	realQueue.Stop()
+
+	appReal := newApp(nil, map[string]string{}, realQueue)
+
+	// First commit fills the 1-capacity buffer
+	status1, _, _ := post(appReal, "/v1/namespaces/default/tables/t1", `{"metadata-location": "s3://b/v1.json"}`)
+	assert.Equal(t, 200, status1)
+
+	// Second commit cannot fit into the buffer, triggering 429 Backpressure
+	status2, body2, headers2 := post(appReal, "/v1/namespaces/default/tables/t2", `{"metadata-location": "s3://b/v2.json"}`)
+	assert.Equal(t, 429, status2)
+	assert.Equal(t, "1", headers2["Retry-After"])
+	assert.Contains(t, body2, "QueueSaturatedException")
 }
 
 func TestCatalogCommitConflictOnMismatchedUUID(t *testing.T) {
