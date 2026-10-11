@@ -63,7 +63,7 @@ func (q *IngestionQueue) worker() {
 			}
 			log.Printf("IngestionQueue: Processing commit for %s.%s (Metadata: %s)", task.Namespace, task.TableName, task.MetadataLocation)
 			if q.engine != nil {
-				if err := q.engine.SyncToDuckLake(task.MetadataLocation); err != nil {
+				if err := q.engine.SyncDeltaIncremental(task); err != nil {
 					log.Printf("IngestionQueue: Sync error for %s.%s: %v", task.Namespace, task.TableName, err)
 				}
 			}
