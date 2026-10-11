@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent
 
-- [ ] Sửa `SaveTablePointer` trong `storage/postgres.go` có điều kiện CAS và kiểm tra `RowsAffected()`.
-- [ ] Định nghĩa lỗi `ErrCommitConflict = errors.New("commit conflict")`.
-- [ ] Cập nhật `POST /v1/namespaces/:namespace/tables/:table` trong `api/catalog.go` để trả về HTTP 409 khi xung đột CAS và HTTP 500 khi DB lỗi.
-- [ ] Viết unit test xác nhận việc từ chối ghi đè khi previous pointer không khớp.
+- [x] Sửa `SaveTablePointer` trong `storage/postgres.go` có điều kiện CAS và kiểm tra `RowsAffected()`.
+- [x] Định nghĩa lỗi `ErrCommitConflict = errors.New("commit conflict")`.
+- [x] Cập nhật `POST /v1/namespaces/:namespace/tables/:table` trong `api/catalog.go` để trả về HTTP 409 khi xung đột CAS và HTTP 500 khi DB lỗi.
+- [x] Viết unit test xác nhận việc từ chối ghi đè khi previous pointer không khớp.

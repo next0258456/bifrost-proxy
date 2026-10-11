@@ -28,6 +28,14 @@ func (m *MockStorage) GetTableMetadata(ctx context.Context, namespace, table str
 	return data, nil
 }
 
+func (m *MockStorage) GetMetadataByLocation(ctx context.Context, location string) ([]byte, error) {
+	data, ok := m.Tables[location]
+	if !ok {
+		return nil, storage.ErrTableNotFound
+	}
+	return data, nil
+}
+
 func (m *MockStorage) SaveTableMetadata(ctx context.Context, namespace, table string, data []byte) error {
 	key := namespace + "/" + table
 	m.Tables[key] = data
@@ -71,7 +79,7 @@ func TestCatalogRead(t *testing.T) {
 	app := fiber.New()
 	store := &MockStorage{
 		Tables: map[string][]byte{
-			"default/test_table": []byte(`{"format-version": 2, "table-uuid": "uuid-123"}`),
+			"s3://lakehouse/default/test_table/metadata/v1.json": []byte(`{"format-version": 2, "table-uuid": "uuid-123"}`),
 		},
 	}
 	catStore := &MockCatalogStore{
@@ -117,4 +125,22 @@ func TestCatalogCommit(t *testing.T) {
 	reqConflict := httptest.NewRequest("POST", "/v1/namespaces/default/tables/test_table", nil)
 	respConflict, _ := app.Test(reqConflict, -1)
 	assert.Equal(t, 409, respConflict.StatusCode)
+
+	// 3. Queue bão hòa -> 429 Too Many Requests
+	saturatedQueue := &MockQueue{Full: true}
+	appSaturated := fiber.New()
+	api.SetupCatalogRoutes(appSaturated, store, &MockCatalogStore{Pointers: map[string]string{}}, saturatedQueue)
+	req429 := httptest.NewRequest("POST", "/v1/namespaces/default/tables/overflow_table", nil)
+	resp429, _ := appSaturated.Test(req429, -1)
+	assert.Equal(t, 429, resp429.StatusCode)
 }
+
+type MockQueue struct {
+	Full bool
+}
+
+func (m *MockQueue) Submit(task engine.CommitTask) bool {
+	return !m.Full
+}
+
+func (m *MockQueue) Stop() {}
