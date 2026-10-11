@@ -129,46 +129,30 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 
 	// 4. Ghi nhận snapshot mới vào ducklake_catalog.ducklake_snapshot
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")
-	snapshotSQL := fmt.Sprintf(`
+	snapshotSQL := `
 		INSERT INTO ducklake_catalog.ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id)
-		VALUES (%d, '%s', 1, 100, 1000)
+		VALUES ($1, $2, 1, 100, 1000)
 		ON CONFLICT DO NOTHING;
-	`, snapshotID, now)
-	if _, err := e.db.Exec(snapshotSQL); err != nil {
-		log.Printf("Incremental note: snapshot insert: %v", err)
+	`
+	if _, err := e.db.Exec(snapshotSQL, snapshotID, now); err != nil {
+		return fmt.Errorf("failed to insert snapshot into ducklake: %w", err)
 	}
 
-	// 5. Trích xuất file Parquet THẬT từ metadata / manifest
-	type RealDataFile struct {
-		Path            string
-		FileSizeInBytes int64
-		RecordCount     int64
-		Content         int
-	}
+	// 5. Trích xuất file Parquet THẬT từ metadata / Avro manifest list & manifests
+	var dataFiles []ManifestDataFile
 
-	var dataFiles []RealDataFile
-
-	if e.db != nil {
-		query := `
-			SELECT file_path, file_size_in_bytes, record_count, COALESCE(content, 0)
-			FROM iceberg_metadata($1)
-			WHERE snapshot_id = $2;
-		`
-		rows, err := e.db.Query(query, task.MetadataLocation, snapshotID)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var f RealDataFile
-				if err := rows.Scan(&f.Path, &f.FileSizeInBytes, &f.RecordCount, &f.Content); err == nil {
-					dataFiles = append(dataFiles, f)
-				}
-			}
+	if targetSnap != nil && targetSnap.ManifestList != "" && e.store != nil {
+		mFiles, err := ExtractDataFilesFromStorage(context.Background(), e.store, targetSnap.ManifestList, snapshotID)
+		if err != nil {
+			log.Printf("Warning: error reading Avro manifest files: %v", err)
+		} else {
+			dataFiles = append(dataFiles, mFiles...)
 		}
 	}
 
 	if len(dataFiles) == 0 && targetSnap != nil && len(targetSnap.DataFiles) > 0 {
 		for _, f := range targetSnap.DataFiles {
-			dataFiles = append(dataFiles, RealDataFile{
+			dataFiles = append(dataFiles, ManifestDataFile{
 				Path:            f.Path,
 				FileSizeInBytes: f.FileSizeInBytes,
 				RecordCount:     f.RecordCount,
@@ -181,26 +165,26 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	_ = e.db.QueryRow("SELECT COALESCE(MAX(data_file_id), 0) + 1 FROM ducklake_catalog.ducklake_data_file;").Scan(&nextFileID)
 
 	for _, df := range dataFiles {
-		if df.Content == 0 {
-			dataFileSQL := fmt.Sprintf(`
+		if df.Content == 0 { // 0 = Data file
+			dataFileSQL := `
 				INSERT INTO ducklake_catalog.ducklake_data_file 
 				(data_file_id, table_id, begin_snapshot, end_snapshot, path, record_count, file_size_in_bytes, partition_id)
-				VALUES (%d, %d, %d, NULL, '%s', %d, %d, 0);
-			`, nextFileID, tableID, snapshotID, df.Path, df.RecordCount, df.FileSizeInBytes)
-			if _, err := e.db.Exec(dataFileSQL); err != nil {
-				log.Printf("Incremental note: data_file insert error: %v", err)
+				VALUES ($1, $2, $3, NULL, $4, $5, $6, 0);
+			`
+			if _, err := e.db.Exec(dataFileSQL, nextFileID, tableID, snapshotID, df.Path, df.RecordCount, df.FileSizeInBytes); err != nil {
+				return fmt.Errorf("failed to insert data file %s into ducklake: %w", df.Path, err)
 			}
 			nextFileID++
 		}
 	}
 
-	// 6. Ghi nhận sự kiện delta thật vào ducklake_catalog.ducklake_snapshot_changes
-	changeSQL := fmt.Sprintf(`
+	// 6. Ghi nhận sự kiện delta thật vào ducklake_catalog.ducklake_snapshot_changes (5 cột)
+	changeSQL := `
 		INSERT INTO ducklake_catalog.ducklake_snapshot_changes 
-		VALUES (%d, '%s', CURRENT_TIMESTAMP);
-	`, snapshotID, operation)
-	if _, err := e.db.Exec(changeSQL); err != nil {
-		log.Printf("Incremental note: snapshot_changes insert error: %v", err)
+		VALUES ($1, $2, NULL, NULL, NULL);
+	`
+	if _, err := e.db.Exec(changeSQL, snapshotID, operation); err != nil {
+		return fmt.Errorf("failed to insert snapshot change into ducklake: %w", err)
 	}
 
 	log.Printf("Hoàn tất delta sync thật cho %s (snapshot: %d, files: %d)", task.Table, snapshotID, len(dataFiles))
