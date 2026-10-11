@@ -6,16 +6,18 @@ import (
 	"log"
 
 	"bifrost-proxy/config"
+	"bifrost-proxy/storage"
 
 	_ "github.com/marcboeker/go-duckdb"
 )
 
 type SyncEngine struct {
-	db *sql.DB
+	db    *sql.DB
+	store storage.StorageService
 }
 
 // NewSyncEngine initializes the embedded DuckDB connection
-func NewSyncEngine(cfg *config.Config) (*SyncEngine, error) {
+func NewSyncEngine(cfg *config.Config, store storage.StorageService) (*SyncEngine, error) {
 	db, err := sql.Open("duckdb", "?access_mode=read_write")
 	if err != nil {
 		return nil, err
@@ -55,11 +57,17 @@ func NewSyncEngine(cfg *config.Config) (*SyncEngine, error) {
 		log.Printf("Warning: failed to attach ducklake catalog: %v", err)
 	}
 
-	return &SyncEngine{db: db}, nil
+	return &SyncEngine{db: db, store: store}, nil
+}
+
+func (e *SyncEngine) SetStorage(store storage.StorageService) {
+	e.store = store
 }
 
 func (e *SyncEngine) Close() {
-	e.db.Close()
+	if e.db != nil {
+		e.db.Close()
+	}
 }
 
 // SyncToDuckLake triggers the C++ iceberg_to_ducklake routine.

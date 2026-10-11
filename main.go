@@ -34,7 +34,7 @@ func main() {
 	defer catalogStore.Close()
 
 	// 3. DuckDB Sync Engine & Ingestion Queue
-	syncEngine, err := engine.NewSyncEngine(cfg)
+	syncEngine, err := engine.NewSyncEngine(cfg, store)
 	if err != nil {
 		log.Printf("Warning: Failed to init DuckDB engine: %v", err)
 	} else {
