@@ -4,9 +4,9 @@
 
 **Blocked by:** Master-02: Typed Iceberg Commit Parser & HTTP API Hardening
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Mở rộng bảng `catalog_tables` trong Postgres lưu thêm `table_uuid`, `current_snapshot_id`, `current_schema_id`.
-- [ ] Triển khai hàm xác thực `ValidateRequirements(ctx, id, requirements)` trong `storage/postgres.go`.
-- [ ] Trả về mã lỗi `HTTP 409 Conflict` (CommitFailedException) khi có bất kỳ requirement nào không thỏa mãn.
-- [ ] Thực hiện Atomic CAS pointer swap trong PostgreSQL.
+- [x] Mở rộng bảng `catalog_tables` trong Postgres lưu thêm `table_uuid`, `current_snapshot_id`, `current_schema_id`.
+- [x] Triển khai hàm xác thực `ValidateRequirements(ctx, id, requirements)` trong `storage/postgres.go`.
+- [x] Trả về mã lỗi `HTTP 409 Conflict` (CommitFailedException) khi có bất kỳ requirement nào không thỏa mãn.
+- [x] Thực hiện Atomic CAS pointer swap trong PostgreSQL.
