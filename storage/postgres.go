@@ -8,6 +8,7 @@ import (
 
 	"bifrost-proxy/domain"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -91,6 +92,9 @@ func (s *PostgresCatalogStore) ValidateRequirements(ctx context.Context, id doma
 	)
 
 	err := s.pool.QueryRow(ctx, query, id.Namespace, id.Table).Scan(&loc, &currUUID, &currSnapID, &currSchema)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
 	tableExists := err == nil
 
 	for _, req := range reqs {
@@ -103,8 +107,12 @@ func (s *PostgresCatalogStore) ValidateRequirements(ctx context.Context, id doma
 			if !tableExists {
 				return fmt.Errorf("%w: requirement failed: table %s does not exist", ErrCommitConflict, id.String())
 			}
-			if currUUID != nil && *currUUID != "" && req.UUID != "" && *currUUID != req.UUID {
-				return fmt.Errorf("%w: requirement failed: table UUID does not match (expected %s, got %s)", ErrCommitConflict, req.UUID, *currUUID)
+			actual := ""
+			if currUUID != nil {
+				actual = *currUUID
+			}
+			if req.UUID != "" && actual != req.UUID {
+				return fmt.Errorf("%w: requirement failed: table UUID does not match (expected %s, got %s)", ErrCommitConflict, req.UUID, actual)
 			}
 		case "assert-ref-snapshot-id":
 			if !tableExists {

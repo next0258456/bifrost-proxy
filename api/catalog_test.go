@@ -80,8 +80,8 @@ func (m *fakeCatalog) ValidateRequirements(ctx context.Context, id domain.TableI
 			if !exists {
 				return fmt.Errorf("%w: requirement failed: table does not exist", storage.ErrCommitConflict)
 			}
-			currUUID, ok := m.uuids[key]
-			if ok && req.UUID != "" && currUUID != req.UUID {
+			currUUID := m.uuids[key]
+			if req.UUID != "" && currUUID != req.UUID {
 				return fmt.Errorf("%w: requirement failed: table UUID does not match (expected %s, got %s)", storage.ErrCommitConflict, req.UUID, currUUID)
 			}
 		case "assert-ref-snapshot-id":
@@ -337,6 +337,37 @@ func TestCatalogCommitSuccessWithValidRequirements(t *testing.T) {
 		"updates": [
 			{"action": "set-snapshot-ref", "ref-name": "main", "snapshot-id": 501}
 		],
+		"metadata-location": "s3://b/v2.json",
+		"previous-metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 200, status)
+}
+
+func TestCatalogCommitConflictOnMismatchedSchemaID(t *testing.T) {
+	app := newApp(nil, map[string]string{}, &recordingQueue{})
+	path := "/v1/namespaces/default/tables/schema_test"
+
+	// Initial commit sets schema-id: 0 (valid initial Iceberg schema)
+	status, _, _ := post(app, path, `{
+		"updates": [{"action": "set-current-schema", "schema-id": 0}],
+		"metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 200, status)
+
+	// Commit asserting wrong schema ID (e.g. 1) -> 409 Conflict
+	status, body, _ := post(app, path, `{
+		"requirements": [{"type": "assert-current-schema-id", "current-schema-id": 1}],
+		"metadata-location": "s3://b/v2.json",
+		"previous-metadata-location": "s3://b/v1.json"
+	}`)
+	assert.Equal(t, 409, status)
+	assert.Contains(t, body, "CommitFailedException")
+	assert.Contains(t, body, "current schema id mismatch")
+
+	// Commit asserting matching schema ID 0 -> 200 OK
+	status, _, _ = post(app, path, `{
+		"requirements": [{"type": "assert-current-schema-id", "current-schema-id": 0}],
+		"updates": [{"action": "set-current-schema", "schema-id": 1}],
 		"metadata-location": "s3://b/v2.json",
 		"previous-metadata-location": "s3://b/v1.json"
 	}`)
