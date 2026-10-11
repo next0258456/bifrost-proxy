@@ -164,6 +164,9 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	var nextFileID int64 = 1
 	_ = e.db.QueryRow("SELECT COALESCE(MAX(data_file_id), 0) + 1 FROM ducklake_catalog.ducklake_data_file;").Scan(&nextFileID)
 
+	var nextDeleteFileID int64 = 1
+	_ = e.db.QueryRow("SELECT COALESCE(MAX(delete_file_id), 0) + 1 FROM ducklake_catalog.ducklake_delete_file;").Scan(&nextDeleteFileID)
+
 	for _, df := range dataFiles {
 		if df.Content == 0 { // 0 = Data file
 			dataFileSQL := `
@@ -175,6 +178,39 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 				return fmt.Errorf("failed to insert data file %s into ducklake: %w", df.Path, err)
 			}
 			nextFileID++
+		} else if df.Content == 1 { // 1 = Delete v2 (Position Deletes)
+			var refDataFileID int64 = 1
+			if df.ReferencedPath != "" {
+				_ = e.db.QueryRow("SELECT data_file_id FROM ducklake_catalog.ducklake_data_file WHERE path = $1 LIMIT 1;", df.ReferencedPath).Scan(&refDataFileID)
+			} else {
+				_ = e.db.QueryRow("SELECT COALESCE(MAX(data_file_id), 1) FROM ducklake_catalog.ducklake_data_file WHERE table_id = $1;", tableID).Scan(&refDataFileID)
+			}
+
+			deleteFileSQL := `
+				INSERT INTO ducklake_catalog.ducklake_delete_file 
+				(delete_file_id, table_id, begin_snapshot, end_snapshot, data_file_id, path, record_count, file_size_in_bytes)
+				VALUES ($1, $2, $3, NULL, $4, $5, $6, $7);
+			`
+			if _, err := e.db.Exec(deleteFileSQL, nextDeleteFileID, tableID, snapshotID, refDataFileID, df.Path, df.RecordCount, df.FileSizeInBytes); err != nil {
+				return fmt.Errorf("failed to insert delete file %s into ducklake: %w", df.Path, err)
+			}
+			nextDeleteFileID++
+		}
+	}
+
+	// 6. Xử lý Schema Evolution động: trích xuất danh sách cột thật từ meta.Schemas
+	if meta != nil && len(meta.Schemas) > 0 {
+		activeSchema := meta.Schemas[len(meta.Schemas)-1]
+		for orderIdx, f := range activeSchema.Fields {
+			columnSQL := `
+				INSERT INTO ducklake_catalog.ducklake_column 
+				(column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type)
+				VALUES ($1, $2, NULL, $3, $4, $5, $6)
+				ON CONFLICT DO NOTHING;
+			`
+			if _, err := e.db.Exec(columnSQL, f.ID, snapshotID, tableID, orderIdx+1, f.Name, f.Type); err != nil {
+				return fmt.Errorf("failed to insert column %s into ducklake: %w", f.Name, err)
+			}
 		}
 	}
 

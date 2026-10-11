@@ -101,6 +101,19 @@ func ReadManifestFile(data []byte) ([]ManifestDataFile, error) {
 		if c, ok := dataFileMap["content"].(int32); ok {
 			mdf.Content = int(c)
 		}
+		// Extract Iceberg field 2147483546 (referenced data file path in position deletes)
+		if lowerBounds, ok := dataFileMap["lower_bounds"].(map[string]interface{}); ok {
+			if b, ok := lowerBounds["2147483546"].([]byte); ok {
+				mdf.ReferencedPath = string(b)
+			} else if s, ok := lowerBounds["2147483546"].(string); ok {
+				mdf.ReferencedPath = s
+			}
+		}
+		if mdf.ReferencedPath == "" {
+			if ref, ok := dataFileMap["referenced_data_file"].(string); ok {
+				mdf.ReferencedPath = ref
+			}
+		}
 
 		if mdf.Path != "" {
 			files = append(files, mdf)

@@ -92,3 +92,66 @@ func TestParseMetadataJSONAndExtractRealSnapshot(t *testing.T) {
 	assert.Equal(t, int64(10240), snap.DataFiles[0].FileSizeInBytes)
 	assert.NotContains(t, snap.DataFiles[0].Path, "snapshot-%d.parquet")
 }
+
+func TestDeleteV2AndDynamicSchemaEvolution(t *testing.T) {
+	deleteV2JSON := []byte(`{
+		"format-version": 2,
+		"table-uuid": "uuid-v2-evolution",
+		"current-snapshot-id": 2002,
+		"last-sequence-number": 2,
+		"schemas": [
+			{
+				"schema-id": 0,
+				"fields": [
+					{"id": 1, "name": "order_id", "required": true, "type": "bigint"},
+					{"id": 2, "name": "sku", "required": true, "type": "varchar"},
+					{"id": 3, "name": "discount_pct", "required": false, "type": "float"}
+				]
+			}
+		],
+		"snapshots": [
+			{
+				"snapshot-id": 2002,
+				"timestamp-ms": 1700000000000,
+				"manifest-list": "s3://lakehouse/bronze/sales/metadata/snap-2002.avro",
+				"summary": {
+					"operation": "delete",
+					"added-data-files": "0",
+					"deleted-data-files": "0"
+				},
+				"data-files": [
+					{
+						"file_path": "s3://lakehouse/bronze/sales/data/delete-pos-001.parquet",
+						"file_size_in_bytes": 2048,
+						"record_count": 5,
+						"content": 1,
+						"referenced_path": "s3://lakehouse/bronze/sales/data/00000-1-real.parquet"
+					}
+				]
+			}
+		]
+	}`)
+
+	meta, err := engine.ParseMetadataJSON(deleteV2JSON)
+	require.NoError(t, err)
+
+	// Verify Schema Evolution
+	require.Len(t, meta.Schemas, 1)
+	fields := meta.Schemas[0].Fields
+	require.Len(t, fields, 3)
+	assert.Equal(t, "order_id", fields[0].Name)
+	assert.Equal(t, "sku", fields[1].Name)
+	assert.Equal(t, "discount_pct", fields[2].Name)
+
+	// Verify Delete v2
+	require.Len(t, meta.Snapshots, 1)
+	snap := meta.Snapshots[0]
+	assert.Equal(t, "delete", snap.Summary.Operation)
+	require.Len(t, snap.DataFiles, 1)
+
+	delFile := snap.DataFiles[0]
+	assert.Equal(t, 1, delFile.Content)
+	assert.Equal(t, "s3://lakehouse/bronze/sales/data/delete-pos-001.parquet", delFile.Path)
+	assert.Equal(t, "s3://lakehouse/bronze/sales/data/00000-1-real.parquet", delFile.ReferencedPath)
+}
+
