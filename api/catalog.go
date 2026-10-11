@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bifrost-proxy/domain"
 	"bifrost-proxy/engine"
 	"bifrost-proxy/storage"
 
@@ -10,14 +11,13 @@ import (
 func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogStore storage.CatalogStore, queue engine.QueueService) {
 	// Ticket 02 & Sync-01: Catalog Read API
 	app.Get("/v1/namespaces/:namespace/tables/:table", func(c *fiber.Ctx) error {
-		ns := c.Params("namespace")
-		table := c.Params("table")
+		id := domain.NewTableIdentifier(c.Params("namespace"), c.Params("table"))
 
 		// 1. Kiểm tra con trỏ bảng trong PostgreSQL trước (nếu có catalogStore)
 		var metadataPath string
 		if catalogStore != nil {
 			var err error
-			metadataPath, err = catalogStore.GetTablePointer(c.Context(), ns, table)
+			metadataPath, err = catalogStore.GetTablePointer(c.Context(), id)
 			if err != nil {
 				if err == storage.ErrTableNotFound {
 					return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
@@ -40,7 +40,7 @@ func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogSto
 		if metadataPath != "" {
 			data, err = store.GetMetadataByLocation(c.Context(), metadataPath)
 		} else {
-			data, err = store.GetTableMetadata(c.Context(), ns, table)
+			data, err = store.GetTableMetadata(c.Context(), id)
 		}
 
 		if err != nil {
@@ -64,23 +64,22 @@ func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogSto
 
 	// Ticket 03 & Sync-01 & Sync-02: Ingestion Commit API
 	app.Post("/v1/namespaces/:namespace/tables/:table", func(c *fiber.Ctx) error {
-		ns := c.Params("namespace")
-		table := c.Params("table")
+		id := domain.NewTableIdentifier(c.Params("namespace"), c.Params("table"))
 
 		var payload map[string]interface{}
 		_ = c.BodyParser(&payload)
 
 		metadataPath, ok := payload["metadata-location"].(string)
 		if !ok || metadataPath == "" {
-			metadataPath = "s3://lakehouse/" + ns + "/" + table + "/metadata/current.json"
-			_ = store.SaveTableMetadata(c.Context(), ns, table, c.Body())
+			metadataPath = "s3://lakehouse/" + id.Namespace + "/" + id.Table + "/metadata/current.json"
+			_ = store.SaveTableMetadata(c.Context(), id, c.Body())
 		}
 
 		previousLocation, _ := payload["previous-metadata-location"].(string)
 
 		// Bước 1: GHI ĐỒNG BỘ VÀO POSTGRES CÓ KIỂM TRA CAS (< 2ms)
 		if catalogStore != nil {
-			if err := catalogStore.SaveTablePointer(c.Context(), ns, table, metadataPath, previousLocation); err != nil {
+			if err := catalogStore.SaveTablePointer(c.Context(), id, metadataPath, previousLocation); err != nil {
 				if err == storage.ErrCommitConflict {
 					return c.Status(fiber.StatusConflict).JSON(fiber.Map{
 						"error": fiber.Map{
@@ -116,8 +115,7 @@ func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogSto
 		// Bước 2: KÍCH HOẠT ĐỒNG BỘ DUCKLAKE QUA QUEUE VỚI CƠ CHẾ BACKPRESSURE (Ticket Fix-04)
 		if queue != nil {
 			ok := queue.Submit(engine.CommitTask{
-				Namespace:        ns,
-				TableName:        table,
+				Table:            id,
 				MetadataLocation: metadataPath,
 				SnapshotID:       snapshotID,
 			})

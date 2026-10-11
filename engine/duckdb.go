@@ -4,7 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
+
+	"bifrost-proxy/config"
 
 	_ "github.com/marcboeker/go-duckdb"
 )
@@ -14,7 +15,7 @@ type SyncEngine struct {
 }
 
 // NewSyncEngine initializes the embedded DuckDB connection
-func NewSyncEngine() (*SyncEngine, error) {
+func NewSyncEngine(cfg *config.Config) (*SyncEngine, error) {
 	db, err := sql.Open("duckdb", "?access_mode=read_write")
 	if err != nil {
 		return nil, err
@@ -31,19 +32,6 @@ func NewSyncEngine() (*SyncEngine, error) {
 	db.Exec("INSTALL ducklake; LOAD ducklake;")
 
 	// Khởi tạo Secret S3 để đọc file Avro/Parquet và metadata JSON
-	endpoint := os.Getenv("S3_ENDPOINT")
-	if endpoint == "" {
-		endpoint = "minio:9000"
-	}
-	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-	if accessKey == "" {
-		accessKey = "admin"
-	}
-	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	if secretKey == "" {
-		secretKey = "password"
-	}
-
 	secretSQL := fmt.Sprintf(`
 		CREATE SECRET IF NOT EXISTS s3_bifrost (
 			TYPE S3,
@@ -54,7 +42,7 @@ func NewSyncEngine() (*SyncEngine, error) {
 			URL_STYLE 'path',
 			USE_SSL 'false'
 		);
-	`, accessKey, secretKey, endpoint)
+	`, cfg.AWSAccessKeyID, cfg.AWSSecretAccessKey, cfg.S3Endpoint)
 	
 	_, err = db.Exec(secretSQL)
 	if err != nil {

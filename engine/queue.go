@@ -4,12 +4,13 @@ import (
 	"context"
 	"log"
 	"sync"
+
+	"bifrost-proxy/domain"
 )
 
 // CommitTask represents an asynchronous task to synchronize Iceberg delta to DuckLake
 type CommitTask struct {
-	Namespace        string
-	TableName        string
+	Table            domain.TableIdentifier
 	MetadataLocation string
 	SnapshotID       int64
 }
@@ -38,7 +39,7 @@ func NewIngestionQueue(engine *SyncEngine, bufferSize int) *IngestionQueue {
 		cancel:   cancel,
 	}
 
-	// Start 1 single sequential worker to eliminate write contention and enforce RAM limits
+	// 1 sequential worker eliminates write contention and enforces RAM limits
 	q.wg.Add(1)
 	go q.worker()
 
@@ -51,7 +52,7 @@ func (q *IngestionQueue) Submit(task CommitTask) bool {
 	case q.taskChan <- task:
 		return true
 	default:
-		log.Printf("Warning: IngestionQueue is full! Dropping or shedding load for table: %s.%s", task.Namespace, task.TableName)
+		log.Printf("Warning: IngestionQueue is full! Rejecting commit for table: %s", task.Table)
 		return false
 	}
 }
@@ -67,10 +68,10 @@ func (q *IngestionQueue) worker() {
 			if !ok {
 				return
 			}
-			log.Printf("IngestionQueue: Processing commit for %s.%s (Metadata: %s)", task.Namespace, task.TableName, task.MetadataLocation)
+			log.Printf("IngestionQueue: Processing commit for %s (Metadata: %s)", task.Table, task.MetadataLocation)
 			if q.engine != nil {
 				if err := q.engine.SyncDeltaIncremental(task); err != nil {
-					log.Printf("IngestionQueue: Sync error for %s.%s: %v", task.Namespace, task.TableName, err)
+					log.Printf("IngestionQueue: Sync error for %s: %v", task.Table, err)
 				}
 			}
 		}
@@ -79,7 +80,6 @@ func (q *IngestionQueue) worker() {
 
 func (q *IngestionQueue) Stop() {
 	q.cancel()
-	close(q.taskChan)
 	q.wg.Wait()
 	log.Println("IngestionQueue stopped cleanly.")
 }

@@ -8,6 +8,8 @@ import (
 	"io"
 	"strings"
 
+	"bifrost-proxy/domain"
+
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -16,9 +18,9 @@ var ErrTableNotFound = errors.New("table not found")
 
 // StorageService defines the interface for interacting with underlying storage
 type StorageService interface {
-	GetTableMetadata(ctx context.Context, namespace, table string) ([]byte, error)
+	GetTableMetadata(ctx context.Context, id domain.TableIdentifier) ([]byte, error)
 	GetMetadataByLocation(ctx context.Context, location string) ([]byte, error)
-	SaveTableMetadata(ctx context.Context, namespace, table string, data []byte) error
+	SaveTableMetadata(ctx context.Context, id domain.TableIdentifier, data []byte) error
 }
 
 type MinioStorage struct {
@@ -72,13 +74,13 @@ func (s *MinioStorage) GetMetadataByLocation(ctx context.Context, location strin
 	return io.ReadAll(obj)
 }
 
-func (s *MinioStorage) GetTableMetadata(ctx context.Context, namespace, table string) ([]byte, error) {
-	objectName := fmt.Sprintf("%s/%s/metadata.json", namespace, table)
+func (s *MinioStorage) GetTableMetadata(ctx context.Context, id domain.TableIdentifier) ([]byte, error) {
+	objectName := fmt.Sprintf("%s/%s/metadata.json", id.Namespace, id.Table)
 	return s.GetMetadataByLocation(ctx, objectName)
 }
 
-func (s *MinioStorage) SaveTableMetadata(ctx context.Context, namespace, table string, data []byte) error {
-	objectName := fmt.Sprintf("%s/%s/metadata/current.json", namespace, table)
+func (s *MinioStorage) SaveTableMetadata(ctx context.Context, id domain.TableIdentifier, data []byte) error {
+	objectName := fmt.Sprintf("%s/%s/metadata/current.json", id.Namespace, id.Table)
 	reader := bytes.NewReader(data)
 	_, err := s.client.PutObject(ctx, s.bucket, objectName, reader, int64(len(data)), minio.PutObjectOptions{
 		ContentType: "application/json",

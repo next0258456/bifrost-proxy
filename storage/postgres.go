@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"log"
 
+	"bifrost-proxy/domain"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var ErrCommitConflict = errors.New("commit conflict: table pointer has changed or table already exists")
 
 type CatalogStore interface {
-	GetTablePointer(ctx context.Context, namespace, table string) (string, error)
-	SaveTablePointer(ctx context.Context, namespace, table, metadataLocation, previousLocation string) error
+	GetTablePointer(ctx context.Context, id domain.TableIdentifier) (string, error)
+	SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error
 	Close()
 }
 
@@ -27,7 +29,6 @@ func NewPostgresCatalogStore(ctx context.Context, connString string) (*PostgresC
 		return nil, fmt.Errorf("unable to connect to database: %w", err)
 	}
 
-	// Auto-migrate catalog_tables table
 	query := `
 	CREATE TABLE IF NOT EXISTS catalog_tables (
 		namespace VARCHAR(255) NOT NULL,
@@ -53,37 +54,34 @@ func (s *PostgresCatalogStore) Close() {
 	}
 }
 
-func (s *PostgresCatalogStore) GetTablePointer(ctx context.Context, namespace, table string) (string, error) {
+func (s *PostgresCatalogStore) GetTablePointer(ctx context.Context, id domain.TableIdentifier) (string, error) {
 	var metadataLocation string
 	query := `SELECT metadata_location FROM catalog_tables WHERE namespace = $1 AND table_name = $2`
-	err := s.pool.QueryRow(ctx, query, namespace, table).Scan(&metadataLocation)
+	err := s.pool.QueryRow(ctx, query, id.Namespace, id.Table).Scan(&metadataLocation)
 	if err != nil {
 		return "", ErrTableNotFound
 	}
 	return metadataLocation, nil
 }
 
-// SaveTablePointer executes atomic Compare-And-Swap (CAS) update
-func (s *PostgresCatalogStore) SaveTablePointer(ctx context.Context, namespace, table, metadataLocation, previousLocation string) error {
+// SaveTablePointer executes an atomic Compare-And-Swap (CAS) update.
+func (s *PostgresCatalogStore) SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error {
 	if previousLocation == "" {
-		// Tạo mới bảng: chỉ thành công nếu bảng chưa từng tồn tại
 		insertQuery := `
 		INSERT INTO catalog_tables (namespace, table_name, metadata_location, previous_metadata_location, updated_at)
 		VALUES ($1, $2, $3, '', CURRENT_TIMESTAMP)
 		ON CONFLICT (namespace, table_name) DO NOTHING;
 		`
-		tag, err := s.pool.Exec(ctx, insertQuery, namespace, table, metadataLocation)
+		tag, err := s.pool.Exec(ctx, insertQuery, id.Namespace, id.Table, metadataLocation)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() == 0 {
-			// Bảng đã tồn tại nhưng client lại gửi previousLocation rỗng -> xung đột
 			return ErrCommitConflict
 		}
 		return nil
 	}
 
-	// Cập nhật bảng hiện có: chỉ thành công khi con trỏ hiện tại đúng bằng previousLocation (CAS)
 	updateQuery := `
 	UPDATE catalog_tables
 	SET metadata_location = $1,
@@ -93,7 +91,7 @@ func (s *PostgresCatalogStore) SaveTablePointer(ctx context.Context, namespace, 
 	  AND table_name = $4
 	  AND metadata_location = $2;
 	`
-	tag, err := s.pool.Exec(ctx, updateQuery, metadataLocation, previousLocation, namespace, table)
+	tag, err := s.pool.Exec(ctx, updateQuery, metadataLocation, previousLocation, id.Namespace, id.Table)
 	if err != nil {
 		return err
 	}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"bifrost-proxy/api"
+	"bifrost-proxy/domain"
 	"bifrost-proxy/engine"
 	"bifrost-proxy/storage"
 
@@ -19,8 +20,8 @@ type MockStorage struct {
 	Tables map[string][]byte
 }
 
-func (m *MockStorage) GetTableMetadata(ctx context.Context, namespace, table string) ([]byte, error) {
-	key := namespace + "/" + table
+func (m *MockStorage) GetTableMetadata(ctx context.Context, id domain.TableIdentifier) ([]byte, error) {
+	key := id.Namespace + "/" + id.Table
 	data, ok := m.Tables[key]
 	if !ok {
 		return nil, storage.ErrTableNotFound
@@ -36,8 +37,8 @@ func (m *MockStorage) GetMetadataByLocation(ctx context.Context, location string
 	return data, nil
 }
 
-func (m *MockStorage) SaveTableMetadata(ctx context.Context, namespace, table string, data []byte) error {
-	key := namespace + "/" + table
+func (m *MockStorage) SaveTableMetadata(ctx context.Context, id domain.TableIdentifier, data []byte) error {
+	key := id.Namespace + "/" + id.Table
 	m.Tables[key] = data
 	return nil
 }
@@ -47,8 +48,8 @@ type MockCatalogStore struct {
 	Pointers map[string]string
 }
 
-func (m *MockCatalogStore) GetTablePointer(ctx context.Context, namespace, table string) (string, error) {
-	key := namespace + "/" + table
+func (m *MockCatalogStore) GetTablePointer(ctx context.Context, id domain.TableIdentifier) (string, error) {
+	key := id.Namespace + "/" + id.Table
 	ptr, ok := m.Pointers[key]
 	if !ok {
 		return "", storage.ErrTableNotFound
@@ -56,8 +57,8 @@ func (m *MockCatalogStore) GetTablePointer(ctx context.Context, namespace, table
 	return ptr, nil
 }
 
-func (m *MockCatalogStore) SaveTablePointer(ctx context.Context, namespace, table, metadataLocation, previousLocation string) error {
-	key := namespace + "/" + table
+func (m *MockCatalogStore) SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error {
+	key := id.Namespace + "/" + id.Table
 	curr, exists := m.Pointers[key]
 	if previousLocation == "" {
 		if exists {

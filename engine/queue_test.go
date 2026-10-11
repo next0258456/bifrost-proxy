@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"bifrost-proxy/domain"
 	"bifrost-proxy/engine"
 
 	"github.com/stretchr/testify/assert"
@@ -22,8 +23,7 @@ func TestIngestionQueueConcurrency(t *testing.T) {
 	for i := 0; i < numTasks; i++ {
 		go func(id int) {
 			ok := queue.Submit(engine.CommitTask{
-				Namespace:        "bronze",
-				TableName:        "fmcg_sales",
+				Table:            domain.NewTableIdentifier("bronze", "fmcg_sales"),
 				MetadataLocation: "s3://lakehouse/bronze/fmcg_sales/metadata/v1.json",
 				SnapshotID:       int64(id),
 			})
