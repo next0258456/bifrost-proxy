@@ -282,11 +282,6 @@ func (meta *IcebergMetadata) ResolveSchemaForSnapshot(snap *SnapshotEntry) *Sche
 	return &meta.Schemas[0]
 }
 
-// resolveSchemaForSnapshot delegates to meta.ResolveSchemaForSnapshot for convenience.
-func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *SchemaEntry {
-	return meta.ResolveSchemaForSnapshot(snap)
-}
-
 // SyncDeltaIncremental synchronises one committed Iceberg snapshot into DuckLake.
 func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	log.Printf("Starting delta sync for %s (snapshot: %d)", task.Table, task.SnapshotID)
@@ -474,7 +469,7 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 	}
 
 	// Resolve originating historical schema for this snapshot (preserving exact schema version)
-	activeSchema := resolveSchemaForSnapshot(meta, targetSnap)
+	activeSchema := meta.ResolveSchemaForSnapshot(targetSnap)
 
 	// 4. Trích xuất file Parquet THẬT từ metadata / Avro manifest list & manifests
 	var dataFiles []ManifestDataFile

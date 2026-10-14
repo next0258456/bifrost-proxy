@@ -277,7 +277,7 @@ def test_e2e_write_pyiceberg_read_ducklake():
         print(f"           [Stats] File #{df_id} Col #{col_id}: min={min_val}, max={max_val}")
         if col_id == 1 and min_val == '101':
             found_order_id_stats = True
-        if col_id == 1 and max_val >= '103':
+        if col_id == 1 and max_val.isdigit() and int(max_val) >= 103:
             found_order_id_max = True
         if col_id == 2 and min_val == 'Bifrost' and max_val == 'DuckLake':
             found_customer_name_stats = True

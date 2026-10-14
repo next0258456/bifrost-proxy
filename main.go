@@ -40,7 +40,8 @@ func main() {
 	}
 	defer syncEngine.Close()
 
-	queue := engine.NewIngestionQueue(syncEngine, 50000)
+	// Default queue capacity of 1,000 tasks per SPEC_Fixes_and_Hardening.md
+	queue := engine.NewIngestionQueue(syncEngine, 1000)
 	defer queue.Stop()
 
 	// 4. Mount Routes

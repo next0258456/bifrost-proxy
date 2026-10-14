@@ -758,19 +758,19 @@ func TestResolveSchemaForSnapshotWithTimestamp(t *testing.T) {
 
 	// 1. Snapshot with timestamp 1500 (between 1000 and 2000) and no explicit schema-id -> should resolve to Schema 0
 	snapHistorical := &SnapshotEntry{SnapshotID: 150, TimestampMS: 1500}
-	resolved := resolveSchemaForSnapshot(meta, snapHistorical)
+	resolved := meta.ResolveSchemaForSnapshot(snapHistorical)
 	require.NotNil(t, resolved)
 	assert.Equal(t, 0, resolved.SchemaID)
 
 	// 2. Snapshot with timestamp 2500 (between 2000 and 3000) and no explicit schema-id -> should resolve to Schema 1
 	snapHistorical2 := &SnapshotEntry{SnapshotID: 250, TimestampMS: 2500}
-	resolved2 := resolveSchemaForSnapshot(meta, snapHistorical2)
+	resolved2 := meta.ResolveSchemaForSnapshot(snapHistorical2)
 	require.NotNil(t, resolved2)
 	assert.Equal(t, 1, resolved2.SchemaID)
 
 	// 3. Current snapshot (300) -> should resolve to CurrentSchemaID (2)
 	snapCurrent := &SnapshotEntry{SnapshotID: 300, TimestampMS: 3000}
-	resolvedCurrent := resolveSchemaForSnapshot(meta, snapCurrent)
+	resolvedCurrent := meta.ResolveSchemaForSnapshot(snapCurrent)
 	require.NotNil(t, resolvedCurrent)
 	assert.Equal(t, 2, resolvedCurrent.SchemaID)
 }

@@ -96,6 +96,9 @@ func DecodeIcebergBinaryBound(rawBytes []byte, icebergType string) (string, erro
 			return "", fmt.Errorf("invalid byte length for time: %d", len(rawBytes))
 		}
 		us := int64(binary.LittleEndian.Uint64(rawBytes))
+		if us < 0 || us >= 86400000000 {
+			return "", fmt.Errorf("time microseconds %d out of daily range [0, 86400000000)", us)
+		}
 		totalSec := us / 1000000
 		remUS := us % 1000000
 		hr := totalSec / 3600
@@ -121,7 +124,7 @@ func DecodeIcebergBinaryBound(rawBytes []byte, icebergType string) (string, erro
 		if len(rawBytes) == 16 {
 			u, err := uuid.FromBytes(rawBytes)
 			if err != nil {
-				return "", err
+				return "", fmt.Errorf("failed to parse uuid bytes: %w", err)
 			}
 			return u.String(), nil
 		}
