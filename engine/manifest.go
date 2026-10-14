@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"strconv"
@@ -100,10 +101,7 @@ func DecodeIcebergBinaryBound(rawBytes []byte, icebergType string) (string, erro
 		hr := totalSec / 3600
 		min := (totalSec % 3600) / 60
 		sec := totalSec % 60
-		if remUS > 0 {
-			return fmt.Sprintf("%02d:%02d:%02d.%06d", hr, min, sec, remUS), nil
-		}
-		return fmt.Sprintf("%02d:%02d:%02d", hr, min, sec), nil
+		return fmt.Sprintf("%02d:%02d:%02d.%06d", hr, min, sec, remUS), nil
 
 	case strings.HasPrefix(t, "timestamp"):
 		if len(rawBytes) < 8 {

@@ -232,7 +232,37 @@ func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *Schem
 		}
 	}
 
-	// 3. If target snap is historical, resolve to the earliest schema (e.g. SchemaID 0 or first schema)
+	// 3. Temporal resolution using snap.TimestampMS:
+	// Search meta.Snapshots for the closest snapshot with a known SchemaID at or before snap.TimestampMS
+	if snap != nil && snap.TimestampMS > 0 && len(meta.Snapshots) > 0 {
+		var closestSchemaID *int
+		var closestTimestamp int64 = -1
+
+		for _, s := range meta.Snapshots {
+			if s.SchemaID != nil && s.TimestampMS <= snap.TimestampMS {
+				if s.TimestampMS >= closestTimestamp {
+					closestTimestamp = s.TimestampMS
+					id := *s.SchemaID
+					closestSchemaID = &id
+				}
+			}
+		}
+
+		if closestSchemaID != nil {
+			for i := range meta.Schemas {
+				if meta.Schemas[i].SchemaID == *closestSchemaID {
+					return &meta.Schemas[i]
+				}
+			}
+		}
+	}
+
+	// 4. If only 1 schema exists, return it
+	if len(meta.Schemas) == 1 {
+		return &meta.Schemas[0]
+	}
+
+	// 5. If target snap is historical, resolve to the earliest schema (e.g. SchemaID 0 or first schema)
 	if snap != nil && snap.SnapshotID != 0 && snap.SnapshotID != meta.CurrentSnapshotID {
 		for i := range meta.Schemas {
 			if meta.Schemas[i].SchemaID == 0 {
@@ -242,7 +272,7 @@ func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *Schem
 		return &meta.Schemas[0]
 	}
 
-	// 4. Default fallback to CurrentSchemaID or first schema
+	// 6. Default fallback to CurrentSchemaID or first schema
 	for i := range meta.Schemas {
 		if meta.Schemas[i].SchemaID == meta.CurrentSchemaID {
 			return &meta.Schemas[i]

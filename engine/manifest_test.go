@@ -593,12 +593,30 @@ func TestDecodeIcebergBinaryBound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "CongAnh", res)
 
+	// Time (microseconds from midnight)
+	// Case 1: with zero remainder microsecond
+	timeBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(timeBuf, uint64(37230000000)) // 10h 20m 30s 0us
+	res, err = DecodeIcebergBinaryBound(timeBuf, "time")
+	require.NoError(t, err)
+	assert.Equal(t, "10:20:30.000000", res)
+
+	// Case 2: with non-zero microsecond
+	binary.LittleEndian.PutUint64(timeBuf, uint64(37230123456)) // 10h 20m 30s 123456us
+	res, err = DecodeIcebergBinaryBound(timeBuf, "time")
+	require.NoError(t, err)
+	assert.Equal(t, "10:20:30.123456", res)
+
 	// Decimal(18, 2)
 	// 1250 cents = 12.50
 	decBytes := []byte{0x04, 0xe2} // 1250 in big-endian
 	res, err = DecodeIcebergBinaryBound(decBytes, "decimal(18, 2)")
 	require.NoError(t, err)
 	assert.Equal(t, "12.50", res)
+
+	// Decimal with invalid scale returns error
+	_, err = DecodeIcebergBinaryBound(decBytes, "decimal(18, invalid)")
+	require.Error(t, err)
 }
 
 func TestReadManifestFileWithColTypesAndBinaryBounds(t *testing.T) {
@@ -721,3 +739,38 @@ func TestReadManifestFileWithColTypesAndBinaryBounds(t *testing.T) {
 	assert.Equal(t, "999.99", *col2.MaxValue)
 }
 
+func TestResolveSchemaForSnapshotWithTimestamp(t *testing.T) {
+	intPtr := func(i int) *int { return &i }
+	meta := &IcebergMetadata{
+		CurrentSnapshotID: 300,
+		CurrentSchemaID:   2,
+		Schemas: []SchemaEntry{
+			{SchemaID: 0, Fields: []FieldEntry{{ID: 1, Name: "id", Type: "long"}}},
+			{SchemaID: 1, Fields: []FieldEntry{{ID: 1, Name: "id", Type: "long"}, {ID: 2, Name: "v1_col", Type: "string"}}},
+			{SchemaID: 2, Fields: []FieldEntry{{ID: 1, Name: "id", Type: "long"}, {ID: 2, Name: "v1_col", Type: "string"}, {ID: 3, Name: "v2_col", Type: "double"}}},
+		},
+		Snapshots: []SnapshotEntry{
+			{SnapshotID: 100, TimestampMS: 1000, SchemaID: intPtr(0)},
+			{SnapshotID: 200, TimestampMS: 2000, SchemaID: intPtr(1)},
+			{SnapshotID: 300, TimestampMS: 3000, SchemaID: intPtr(2)},
+		},
+	}
+
+	// 1. Snapshot with timestamp 1500 (between 1000 and 2000) and no explicit schema-id -> should resolve to Schema 0
+	snapHistorical := &SnapshotEntry{SnapshotID: 150, TimestampMS: 1500}
+	resolved := resolveSchemaForSnapshot(meta, snapHistorical)
+	require.NotNil(t, resolved)
+	assert.Equal(t, 0, resolved.SchemaID)
+
+	// 2. Snapshot with timestamp 2500 (between 2000 and 3000) and no explicit schema-id -> should resolve to Schema 1
+	snapHistorical2 := &SnapshotEntry{SnapshotID: 250, TimestampMS: 2500}
+	resolved2 := resolveSchemaForSnapshot(meta, snapHistorical2)
+	require.NotNil(t, resolved2)
+	assert.Equal(t, 1, resolved2.SchemaID)
+
+	// 3. Current snapshot (300) -> should resolve to CurrentSchemaID (2)
+	snapCurrent := &SnapshotEntry{SnapshotID: 300, TimestampMS: 3000}
+	resolvedCurrent := resolveSchemaForSnapshot(meta, snapCurrent)
+	require.NotNil(t, resolvedCurrent)
+	assert.Equal(t, 2, resolvedCurrent.SchemaID)
+}
