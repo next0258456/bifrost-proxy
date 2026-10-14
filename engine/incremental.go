@@ -256,8 +256,10 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		for i := 0; i < targetIdx; i++ {
 			prevSnap := &meta.Snapshots[i]
 			var snapExists int
-			err := e.db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = $1;", prevSnap.SnapshotID).Scan(&snapExists)
-			if err == nil && snapExists == 0 {
+			if err := e.db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = $1;", prevSnap.SnapshotID).Scan(&snapExists); err != nil {
+				return fmt.Errorf("failed to check snapshot %d existence during catch-up: %w", prevSnap.SnapshotID, err)
+			}
+			if snapExists == 0 {
 				log.Printf("IngestionQueue: Catching up missing snapshot %d for %s", prevSnap.SnapshotID, task.Table)
 				catchUpTask := CommitTask{
 					Table:            task.Table,
@@ -367,7 +369,9 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 	if meta != nil && meta.TableUUID != "" {
 		tableUUID = meta.TableUUID
 	} else if !newTableCreated {
-		_ = tx.QueryRow("SELECT table_uuid FROM ducklake_catalog.ducklake_table WHERE table_id = $1;", tableID).Scan(&tableUUID)
+		if err := tx.QueryRow("SELECT table_uuid FROM ducklake_catalog.ducklake_table WHERE table_id = $1;", tableID).Scan(&tableUUID); err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("failed to query table_uuid for table_id %d: %w", tableID, err)
+		}
 	}
 
 	// Resolve active schema early for column stats and evolution
@@ -456,7 +460,7 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 				return fmt.Errorf("failed to insert data file %s into ducklake: %w", df.Path, err)
 			}
 
-			// Ingest column bounds & stats into ducklake_file_column_stats
+			// Ingest column bounds & stats into ducklake_file_column_stats when present in manifest
 			if len(df.ColumnStats) > 0 {
 				for _, cs := range df.ColumnStats {
 					if _, err := tx.Exec(colStatSQL, nextFileID, tableID, cs.ColumnID, ptrToAny(cs.ColumnSizeBytes), ptrToAny(cs.ValueCount), ptrToAny(cs.NullCount), ptrToAny(cs.MinValue), ptrToAny(cs.MaxValue), ptrToAny(cs.ContainsNaN)); err != nil {

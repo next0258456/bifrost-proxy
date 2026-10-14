@@ -73,11 +73,11 @@ func (q *IngestionQueue) worker() {
 			}
 			log.Printf("IngestionQueue: Processing commit for %s (Metadata: %s)", task.Table, task.MetadataLocation)
 			if q.engine != nil {
-				var syncErr error
-				backoff := q.RetryBackoff
-				if backoff == 0 {
-					backoff = 100 * time.Millisecond
+				retrySchedule := []time.Duration{100 * time.Millisecond, 500 * time.Millisecond, 1500 * time.Millisecond}
+				if q.RetryBackoff > 0 {
+					retrySchedule = []time.Duration{q.RetryBackoff, q.RetryBackoff * 5, q.RetryBackoff * 15}
 				}
+				var syncErr error
 				for attempt := 1; attempt <= 3; attempt++ {
 					syncErr = q.engine.SyncDeltaIncremental(task)
 					if syncErr == nil {
@@ -85,9 +85,9 @@ func (q *IngestionQueue) worker() {
 					}
 					log.Printf("IngestionQueue: Attempt %d failed for %s: %v", attempt, task.Table, syncErr)
 					if attempt < 3 {
+						delay := retrySchedule[attempt-1]
 						select {
-						case <-time.After(backoff):
-							backoff *= 3
+						case <-time.After(delay):
 						case <-q.ctx.Done():
 							return
 						}

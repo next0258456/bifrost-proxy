@@ -56,6 +56,17 @@ func extractMapOrArray(raw interface{}) map[int64]interface{} {
 	return result
 }
 
+// collectUniqueKeys aggregates all unique int64 keys across multiple maps
+func collectUniqueKeys(maps ...map[int64]interface{}) map[int64]bool {
+	res := make(map[int64]bool)
+	for _, m := range maps {
+		for k := range m {
+			res[k] = true
+		}
+	}
+	return res
+}
+
 // unwrapAvroUnion extracts the inner concrete value from a goavro union representation (map[string]interface{})
 func unwrapAvroUnion(val interface{}) interface{} {
 	if val == nil {
@@ -248,25 +259,7 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 		lowerBounds := extractMapOrArray(dataFileMap["lower_bounds"])
 		upperBounds := extractMapOrArray(dataFileMap["upper_bounds"])
 
-		allColIDs := make(map[int64]bool)
-		for c := range colSizes {
-			allColIDs[c] = true
-		}
-		for c := range valCounts {
-			allColIDs[c] = true
-		}
-		for c := range nullCounts {
-			allColIDs[c] = true
-		}
-		for c := range nanCounts {
-			allColIDs[c] = true
-		}
-		for c := range lowerBounds {
-			allColIDs[c] = true
-		}
-		for c := range upperBounds {
-			allColIDs[c] = true
-		}
+		allColIDs := collectUniqueKeys(colSizes, valCounts, nullCounts, nanCounts, lowerBounds, upperBounds)
 
 		formatBound := func(v interface{}) *string {
 			if v == nil {
