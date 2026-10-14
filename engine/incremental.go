@@ -220,8 +220,8 @@ func (meta *IcebergMetadata) FindSchema(targetID int) *SchemaEntry {
 	return nil
 }
 
-// resolveSchemaForSnapshot finds the originating schema corresponding to a specific snapshot.
-func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *SchemaEntry {
+// ResolveSchemaForSnapshot finds the originating schema corresponding to a specific snapshot.
+func (meta *IcebergMetadata) ResolveSchemaForSnapshot(snap *SnapshotEntry) *SchemaEntry {
 	if meta == nil || len(meta.Schemas) == 0 {
 		return nil
 	}
@@ -282,6 +282,11 @@ func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *Schem
 	return &meta.Schemas[0]
 }
 
+// resolveSchemaForSnapshot delegates to meta.ResolveSchemaForSnapshot for convenience.
+func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *SchemaEntry {
+	return meta.ResolveSchemaForSnapshot(snap)
+}
+
 // SyncDeltaIncremental synchronises one committed Iceberg snapshot into DuckLake.
 func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	log.Printf("Starting delta sync for %s (snapshot: %d)", task.Table, task.SnapshotID)
@@ -305,9 +310,12 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		if localErr != nil {
 			log.Printf("Warning: failed to load local metadata file for %s: %v", task.MetadataLocation, localErr)
 		}
-	}
-	if meta == nil {
-		return fmt.Errorf("cannot sync table %s: metadata file could not be loaded from %s", task.Table, task.MetadataLocation)
+		if meta == nil {
+			if localErr != nil {
+				return fmt.Errorf("cannot sync table %s: metadata file could not be loaded from %s: %w", task.Table, task.MetadataLocation, localErr)
+			}
+			return fmt.Errorf("cannot sync table %s: metadata file could not be loaded from %s", task.Table, task.MetadataLocation)
+		}
 	}
 
 	// 2. Trích xuất đúng Snapshot và Summary delta thật
