@@ -1022,8 +1022,3 @@ func TestHistoricalSnapshotSchemaResolutionCatchUp(t *testing.T) {
 	assert.Equal(t, 0, leakCount, "Future columns email and age must NOT leak into historical snapshot 1001")
 }
 
-
-
-
-
-

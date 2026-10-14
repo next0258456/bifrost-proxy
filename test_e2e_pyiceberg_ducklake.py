@@ -236,6 +236,14 @@ def test_e2e_write_pyiceberg_read_ducklake():
         print(f"           [Filtered] Order #{o_id}: {c_name} | Price: ${amt}")
     assert len(filtered_rows) == 3, f"Expected 3 orders with amount > 100.0, got {len(filtered_rows)}"
 
+    print("        -> Verifying range query with filter `WHERE amount > 500.0` (Zone Map pruning)...")
+    pruned_rows = pure_ducklake_reader.execute(
+        f"SELECT order_id, customer_name, amount FROM prod_lake.{namespace}.{table_name} WHERE amount > 500.0 ORDER BY order_id;"
+    ).fetchall()
+    for o_id, c_name, amt in pruned_rows:
+        print(f"           [Pruned > 500] Order #{o_id}: {c_name} | Price: ${amt}")
+    assert len(pruned_rows) == 2, f"Expected 2 orders with amount > 500.0, got {len(pruned_rows)}"
+
     # 4.3. RBAC & Read-Only Invariant Verification
     print("    [Security] Verifying RBAC and READ_ONLY denial on write/drop operations...")
     try:
@@ -259,9 +267,22 @@ def test_e2e_write_pyiceberg_read_ducklake():
         ORDER BY data_file_id, column_id;
     """).fetchall()
     print(f"        -> Verified decoded column bounds in ducklake_file_column_stats: {len(stats_rows)} stats entries found")
+    found_order_id_stats = False
+    found_customer_name_stats = False
+    found_amount_stats = False
     for df_id, col_id, min_val, max_val in stats_rows:
         print(f"           [Stats] File #{df_id} Col #{col_id}: min={min_val}, max={max_val}")
+        if col_id == 1 and min_val == '101':
+            found_order_id_stats = True
+        if col_id == 2 and min_val == 'Bifrost' and max_val == 'DuckLake':
+            found_customer_name_stats = True
+        if col_id == 3 and min_val == '12' and max_val == '999.99':
+            found_amount_stats = True
+
     assert len(stats_rows) > 0, "Expected decoded min/max bounds in ducklake_file_column_stats"
+    assert found_order_id_stats, "Expected order_id min_value '101' in ducklake_file_column_stats"
+    assert found_customer_name_stats, "Expected customer_name min 'Bifrost' and max 'DuckLake' in ducklake_file_column_stats"
+    assert found_amount_stats, "Expected amount min '12' and max '999.99' in ducklake_file_column_stats"
 
     try:
         pg_direct.execute("DROP TABLE pg_reader.ducklake_table;")

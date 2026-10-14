@@ -7,8 +7,8 @@
 
 **Blocked by:** p3-06: Timestamp-based Schema Resolution and Time Bounds Formatting
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Cập nhật `test_e2e_pyiceberg_ducklake.py` assert cụ thể giá trị `min_value` và `max_value` của cột `order_id` (101, 105), `customer_name` ('Bifrost', 'DuckLake'), `amount` (12, 999.99).
-- [ ] Bổ sung truy vấn `SELECT ... WHERE amount > 500.0` và khẳng định chỉ trả về đúng 2 bản ghi (> $500).
-- [ ] Chạy Go unit tests, E2E test và k6 benchmark tải 50 VUs xác nhận 100% checks và SLA.
+- [x] Cập nhật `test_e2e_pyiceberg_ducklake.py` assert cụ thể giá trị `min_value` và `max_value` của cột `order_id` (101, 105), `customer_name` ('Bifrost', 'DuckLake'), `amount` (12, 999.99).
+- [x] Bổ sung truy vấn `SELECT ... WHERE amount > 500.0` và khẳng định chỉ trả về đúng 2 bản ghi (> $500).
+- [x] Chạy Go unit tests, E2E test và k6 benchmark tải 50 VUs xác nhận 100% checks và SLA.
