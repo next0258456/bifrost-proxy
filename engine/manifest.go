@@ -42,10 +42,13 @@ type ManifestDataFile struct {
 // DecodeIcebergBinaryBound deserializes raw bytes into a canonical string value
 // according to Iceberg Single-Value Serialization Spec.
 func DecodeIcebergBinaryBound(rawBytes []byte, icebergType string) (string, error) {
-	if len(rawBytes) == 0 {
-		return "", nil
-	}
 	t := strings.ToLower(strings.TrimSpace(icebergType))
+	if len(rawBytes) == 0 {
+		if t == "string" || t == "varchar" {
+			return "", nil
+		}
+		return "", fmt.Errorf("empty byte array for non-string type: %s", icebergType)
+	}
 	switch {
 	case t == "boolean":
 		if rawBytes[0] == 0x01 {
@@ -413,21 +416,16 @@ func ReadManifestFileWithColTypes(data []byte, colTypes map[int64]string) (added
 			}
 			unwrapped := unwrapAvroUnion(v)
 			if b, ok := unwrapped.([]byte); ok {
-				if len(b) == 0 {
-					return nil
-				}
 				var colType string
 				if colTypes != nil {
 					colType = colTypes[colID]
 				}
-				decoded, err := DecodeIcebergBinaryBound(b, colType)
-				if err == nil && decoded != "" {
-					return &decoded
-				}
 				if colType != "" {
-					if err != nil {
-						log.Printf("Warning: failed to decode binary bound for column %d (%s): %v", colID, colType, err)
+					decoded, err := DecodeIcebergBinaryBound(b, colType)
+					if err == nil {
+						return &decoded
 					}
+					log.Printf("Warning: failed to decode binary bound for column %d (%s): %v", colID, colType, err)
 					return nil
 				}
 				if utf8.Valid(b) {

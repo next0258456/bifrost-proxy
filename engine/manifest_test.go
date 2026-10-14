@@ -617,6 +617,21 @@ func TestDecodeIcebergBinaryBound(t *testing.T) {
 	// Decimal with invalid scale returns error
 	_, err = DecodeIcebergBinaryBound(decBytes, "decimal(18, invalid)")
 	require.Error(t, err)
+
+	// Empty string bounds should return "" with no error
+	emptyStrRes, err := DecodeIcebergBinaryBound([]byte{}, "string")
+	require.NoError(t, err)
+	assert.Equal(t, "", emptyStrRes)
+
+	emptyVarcharRes, err := DecodeIcebergBinaryBound([]byte{}, "varchar")
+	require.NoError(t, err)
+	assert.Equal(t, "", emptyVarcharRes)
+
+	// Non-string empty byte array must return error
+	_, err = DecodeIcebergBinaryBound([]byte{}, "int")
+	require.Error(t, err)
+	_, err = DecodeIcebergBinaryBound([]byte{}, "long")
+	require.Error(t, err)
 }
 
 func TestReadManifestFileWithColTypesAndBinaryBounds(t *testing.T) {
