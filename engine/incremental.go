@@ -41,6 +41,7 @@ type SnapshotEntry struct {
 	TimestampMS  int64           `json:"timestamp-ms"`
 	ManifestList string          `json:"manifest-list"`
 	Summary      SnapshotSummary `json:"summary"`
+	SchemaID     *int            `json:"schema-id,omitempty"`
 	DataFiles    []DataFileEntry `json:"data-files,omitempty"`
 }
 
@@ -200,6 +201,50 @@ func allocateNextID(tx *sql.Tx, table, idCol string) (int64, error) {
 		return 0, fmt.Errorf("failed to allocate next %s for %s: %w", idCol, table, err)
 	}
 	return nextID, nil
+}
+
+// resolveSchemaForSnapshot finds the originating schema corresponding to a specific snapshot.
+func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *SchemaEntry {
+	if meta == nil || len(meta.Schemas) == 0 {
+		return nil
+	}
+
+	// 1. Explicit schema-id on snapshot
+	if snap != nil && snap.SchemaID != nil {
+		targetID := *snap.SchemaID
+		for i := range meta.Schemas {
+			if meta.Schemas[i].SchemaID == targetID {
+				return &meta.Schemas[i]
+			}
+		}
+	}
+
+	// 2. If target snap is the current snapshot, use CurrentSchemaID
+	if snap != nil && snap.SnapshotID != 0 && snap.SnapshotID == meta.CurrentSnapshotID {
+		for i := range meta.Schemas {
+			if meta.Schemas[i].SchemaID == meta.CurrentSchemaID {
+				return &meta.Schemas[i]
+			}
+		}
+	}
+
+	// 3. If target snap is historical, resolve to the earliest schema (e.g. SchemaID 0 or first schema)
+	if snap != nil && snap.SnapshotID != 0 && snap.SnapshotID != meta.CurrentSnapshotID {
+		for i := range meta.Schemas {
+			if meta.Schemas[i].SchemaID == 0 {
+				return &meta.Schemas[i]
+			}
+		}
+		return &meta.Schemas[0]
+	}
+
+	// 4. Default fallback to CurrentSchemaID or first schema
+	for i := range meta.Schemas {
+		if meta.Schemas[i].SchemaID == meta.CurrentSchemaID {
+			return &meta.Schemas[i]
+		}
+	}
+	return &meta.Schemas[0]
 }
 
 // SyncDeltaIncremental synchronises one committed Iceberg snapshot into DuckLake.
@@ -381,19 +426,8 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		}
 	}
 
-	// Resolve active schema early for column stats and evolution
-	var activeSchema *SchemaEntry
-	if meta != nil && len(meta.Schemas) > 0 {
-		for i := range meta.Schemas {
-			if meta.Schemas[i].SchemaID == meta.CurrentSchemaID {
-				activeSchema = &meta.Schemas[i]
-				break
-			}
-		}
-		if activeSchema == nil {
-			activeSchema = &meta.Schemas[len(meta.Schemas)-1]
-		}
-	}
+	// Resolve originating historical schema for this snapshot (preserving exact schema version)
+	activeSchema := resolveSchemaForSnapshot(meta, targetSnap)
 
 	// 4. Trích xuất file Parquet THẬT từ metadata / Avro manifest list & manifests
 	var dataFiles []ManifestDataFile

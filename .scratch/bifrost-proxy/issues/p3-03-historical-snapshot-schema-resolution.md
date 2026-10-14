@@ -4,9 +4,9 @@
 
 **Blocked by:** p3-02: Catalog Counter Invariants and Entity ID Synchronization
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Implement `resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *SchemaEntry` to match a snapshot to its true originating schema.
-- [ ] Update `SyncDeltaIncremental` and `syncSnapshotInternal` to use the resolved historical schema for column evolution tracking, column stats fallback, and column ID mapping.
-- [ ] Add unit test with multi-schema progression (Schema 0 with 2 columns, Schema 1 with 4 columns) verifying that catch-up re-sync creates historical column entries matching Schema 0 at Snapshot 1 and Schema 1 at Snapshot 2.
-- [ ] Confirm no future columns leak into historical snapshot DuckLake column records.
+- [x] Implement `resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *SchemaEntry` to match a snapshot to its true originating schema.
+- [x] Update `SyncDeltaIncremental` and `syncSnapshotInternal` to use the resolved historical schema for column evolution tracking, column stats fallback, and column ID mapping.
+- [x] Add unit test with multi-schema progression (Schema 0 with 2 columns, Schema 1 with 4 columns) verifying that catch-up re-sync creates historical column entries matching Schema 0 at Snapshot 1 and Schema 1 at Snapshot 2.
+- [x] Confirm no future columns leak into historical snapshot DuckLake column records.

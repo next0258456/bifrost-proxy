@@ -926,6 +926,102 @@ func TestSnapshotCountersInvariantsWithDeleteFiles(t *testing.T) {
 	assert.Greater(t, lastNextFileID, maxDeleteFileID, "final next_file_id must be greater than max delete_file_id")
 }
 
+func TestHistoricalSnapshotSchemaResolutionCatchUp(t *testing.T) {
+	db, err := sql.Open("duckdb", "?access_mode=read_write")
+	require.NoError(t, err)
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE SCHEMA IF NOT EXISTS ducklake_catalog;
+		CREATE TABLE ducklake_catalog.ducklake_schema (schema_id BIGINT, schema_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_table (table_id BIGINT, table_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, table_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot (snapshot_id BIGINT, snapshot_time VARCHAR, schema_version INT, next_catalog_id INT, next_file_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_data_file (data_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, partition_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
+		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_file_column_stats (data_file_id BIGINT, table_id BIGINT, column_id BIGINT, column_size_bytes BIGINT, value_count BIGINT, null_count BIGINT, min_value VARCHAR, max_value VARCHAR, contains_nan BOOLEAN, extra_stats VARCHAR);
+	`)
+	require.NoError(t, err)
+
+	metaJSON := []byte(`{
+		"format-version": 2,
+		"table-uuid": "uuid-hist-schema",
+		"current-snapshot-id": 1002,
+		"current-schema-id": 1,
+		"last-sequence-number": 2,
+		"schemas": [
+			{
+				"schema-id": 0,
+				"fields": [
+					{"id": 1, "name": "id", "type": "bigint", "required": true},
+					{"id": 2, "name": "name", "type": "string", "required": true}
+				]
+			},
+			{
+				"schema-id": 1,
+				"fields": [
+					{"id": 1, "name": "id", "type": "bigint", "required": true},
+					{"id": 2, "name": "name", "type": "string", "required": true},
+					{"id": 3, "name": "email", "type": "string", "required": false},
+					{"id": 4, "name": "age", "type": "int", "required": false}
+				]
+			}
+		],
+		"snapshots": [
+			{
+				"snapshot-id": 1001,
+				"timestamp-ms": 1700000000000,
+				"schema-id": 0,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{"file_path": "s3://lakehouse/data/batch1.parquet", "file_size_in_bytes": 1000, "record_count": 10, "content": 0}
+				]
+			},
+			{
+				"snapshot-id": 1002,
+				"timestamp-ms": 1700000001000,
+				"schema-id": 1,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{"file_path": "s3://lakehouse/data/batch2.parquet", "file_size_in_bytes": 2000, "record_count": 20, "content": 0}
+				]
+			}
+		]
+	}`)
+
+	mockStore := &mockStorageService{files: make(map[string][]byte)}
+	mockStore.files["s3://lakehouse/bronze/users/metadata/v2.json"] = metaJSON
+	syncEng := engine.NewTestSyncEngine(db, mockStore)
+
+	// Trigger direct commit for snapshot 1002, which triggers catch-up of historical snapshot 1001
+	task := engine.CommitTask{
+		Table:            domain.TableIdentifier{Namespace: "bronze", Table: "users"},
+		MetadataLocation: "s3://lakehouse/bronze/users/metadata/v2.json",
+		SnapshotID:       1002,
+	}
+	require.NoError(t, syncEng.SyncDeltaIncremental(task))
+
+	// Verify columns in ducklake_column:
+	// Columns 1 and 2 must have begin_snapshot = 1001
+	var countSnap1 int
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_column WHERE begin_snapshot = 1001;").Scan(&countSnap1)
+	require.NoError(t, err)
+	assert.Equal(t, 2, countSnap1, "Snapshot 1001 must only have the 2 original columns from Schema 0")
+
+	// Columns 3 and 4 must have begin_snapshot = 1002
+	var countSnap2 int
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_column WHERE begin_snapshot = 1002;").Scan(&countSnap2)
+	require.NoError(t, err)
+	assert.Equal(t, 2, countSnap2, "Snapshot 1002 must add the 2 evolved columns from Schema 1")
+
+	// Confirm that email and age NEVER leaked into Snapshot 1001
+	var leakCount int
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_column WHERE begin_snapshot = 1001 AND column_name IN ('email', 'age');").Scan(&leakCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, leakCount, "Future columns email and age must NOT leak into historical snapshot 1001")
+}
+
 
 
 
