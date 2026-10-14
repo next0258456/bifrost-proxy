@@ -36,10 +36,9 @@ func main() {
 	// 3. DuckDB Sync Engine & Ingestion Queue
 	syncEngine, err := engine.NewSyncEngine(cfg, store)
 	if err != nil {
-		log.Printf("Warning: Failed to init DuckDB engine: %v", err)
-	} else {
-		defer syncEngine.Close()
+		log.Fatalf("Fatal: failed to initialize DuckDB sync engine: %v", err)
 	}
+	defer syncEngine.Close()
 
 	queue := engine.NewIngestionQueue(syncEngine, 1000)
 	defer queue.Stop()

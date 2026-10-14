@@ -418,7 +418,97 @@ func TestSyncDeltaPositionDeleteFailsOnMissingTargetFile(t *testing.T) {
 	err = syncEng.SyncDeltaIncremental(task)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to resolve active referenced data file ID")
+
+	// Verify Transactional Rollback: snapshot 6001 was inserted before the error, but MUST be rolled back
+	var snapCount int
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = 6001;").Scan(&snapCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, snapCount, "Snapshot 6001 must be rolled back completely")
 }
+
+func TestSyncDeltaTransactionalRollbackOnNewTableFailure(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	require.NoError(t, err)
+	defer db.Close()
+
+	// Initialize mock DuckLake catalog schema and tables
+	_, err = db.Exec(`
+		CREATE SCHEMA IF NOT EXISTS ducklake_catalog;
+		CREATE TABLE ducklake_catalog.ducklake_schema (schema_id BIGINT, schema_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_table (table_id BIGINT, table_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, table_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot (snapshot_id BIGINT, snapshot_time VARCHAR, schema_version INT, next_catalog_id INT, next_file_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_data_file (data_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, partition_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
+		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+	`)
+	require.NoError(t, err)
+
+	// New table 'finance.invoices' with an invalid delete file referencing a non-existent file
+	metaJSON := []byte(`{
+		"format-version": 2,
+		"table-uuid": "uuid-invoices",
+		"current-snapshot-id": 7001,
+		"current-schema-id": 0,
+		"last-sequence-number": 1,
+		"schemas": [
+			{
+				"schema-id": 0,
+				"fields": [
+					{"id": 1, "name": "inv_id", "required": true, "type": "bigint"}
+				]
+			}
+		],
+		"snapshots": [
+			{
+				"snapshot-id": 7001,
+				"timestamp-ms": 1700000000000,
+				"summary": {"operation": "delete"},
+				"data-files": [
+					{
+						"file_path": "s3://lakehouse/data/bad_delete.parquet",
+						"file_size_in_bytes": 1000,
+						"record_count": 2,
+						"content": 1,
+						"referenced_path": "s3://lakehouse/data/missing_inv.parquet"
+					}
+				]
+			}
+		]
+	}`)
+
+	mockStore := &mockStorageService{
+		files: map[string][]byte{
+			"s3://lakehouse/metadata/v7.json": metaJSON,
+		},
+	}
+
+	syncEng := engine.NewTestSyncEngine(db, mockStore)
+
+	task := engine.CommitTask{
+		Table:            domain.NewTableIdentifier("finance", "invoices"),
+		MetadataLocation: "s3://lakehouse/metadata/v7.json",
+		SnapshotID:       7001,
+	}
+
+	err = syncEng.SyncDeltaIncremental(task)
+	require.Error(t, err)
+
+	// Ensure neither schema 'finance', table 'invoices', nor snapshot 7001 exist
+	var schemaCount, tableCount, snapCount int
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_schema WHERE schema_name = 'finance';").Scan(&schemaCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, schemaCount, "Schema 'finance' should be rolled back")
+
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_table WHERE table_name = 'invoices';").Scan(&tableCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, tableCount, "Table 'invoices' should be rolled back")
+
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = 7001;").Scan(&snapCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, snapCount, "Snapshot 7001 should be rolled back")
+}
+
 
 
 

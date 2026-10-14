@@ -4,11 +4,11 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] `SyncDeltaIncremental` opens an atomic database transaction (`e.db.BeginTx(ctx, nil)`) and executes all DuckLake table updates (schema, table, snapshot, data files, delete files, columns, snapshot changes) through `*sql.Tx`.
-- [ ] A deferred rollback (`defer tx.Rollback()`) ensures that any failure at any step cleanly rolls back all catalog modifications for that snapshot.
-- [ ] `allocateNextID` helper is updated to accept an `execerQueryer` or `*sql.Tx` so ID allocations run within the transaction context.
-- [ ] Step 6 active column query (`ducklake_column`) checks and returns error (`fmt.Errorf`) instead of swallowing `err == nil`.
-- [ ] `main.go` calls `log.Fatalf` if `engine.NewSyncEngine` fails to initialize DuckDB, preventing the proxy from starting in a degraded state that silently drops tasks.
-- [ ] Unit test verifies transactional rollback on simulated failure without leaving orphaned records in DuckLake catalog tables.
+- [x] `SyncDeltaIncremental` opens an atomic database transaction (`e.db.BeginTx(ctx, nil)`) and executes all DuckLake table updates (schema, table, snapshot, data files, delete files, columns, snapshot changes) through `*sql.Tx`.
+- [x] A deferred rollback (`defer tx.Rollback()`) ensures that any failure at any step cleanly rolls back all catalog modifications for that snapshot.
+- [x] `allocateNextID` helper is updated to accept an `execerQueryer` or `*sql.Tx` so ID allocations run within the transaction context.
+- [x] Step 6 active column query (`ducklake_column`) checks and returns error (`fmt.Errorf`) instead of swallowing `err == nil`.
+- [x] `main.go` calls `log.Fatalf` if `engine.NewSyncEngine` fails to initialize DuckDB, preventing the proxy from starting in a degraded state that silently drops tasks.
+- [x] Unit test verifies transactional rollback on simulated failure without leaving orphaned records in DuckLake catalog tables.
