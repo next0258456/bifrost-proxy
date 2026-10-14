@@ -53,36 +53,28 @@ func SetupCatalogRoutes(app *fiber.App, store storage.StorageService, catalogSto
 			return writeError(c, fiber.StatusBadRequest, "BadRequestException", "metadata-location is required")
 		}
 
-		if err := catalogStore.ValidateRequirements(c.Context(), id, req.Requirements); err != nil {
+		var queueSaturated bool
+		err = catalogStore.CommitTableTransaction(c.Context(), id, req, func() error {
+			if !queue.Submit(engine.CommitTask{
+				Table:            id,
+				MetadataLocation: req.MetadataLocation,
+				SnapshotID:       req.CommittedSnapshotID(),
+			}) {
+				queueSaturated = true
+				return errors.New("queue saturated")
+			}
+			return nil
+		})
+
+		if err != nil {
+			if queueSaturated {
+				c.Set("Retry-After", "1")
+				return writeError(c, fiber.StatusTooManyRequests, "QueueSaturatedException", "Ingestion queue is saturated. Please retry with backoff.")
+			}
 			if errors.Is(err, storage.ErrCommitConflict) {
 				return writeError(c, fiber.StatusConflict, "CommitFailedException", err.Error())
 			}
 			return writeError(c, fiber.StatusInternalServerError, "InternalServerError", err.Error())
-		}
-
-		var snapshotIDPtr *int64
-		if sID := req.CommittedSnapshotID(); sID != 0 {
-			snapshotIDPtr = &sID
-		}
-		var schemaIDPtr *int
-		if sID := req.CommittedSchemaID(); sID != nil {
-			schemaIDPtr = sID
-		}
-
-		if err := catalogStore.SaveTableCommit(c.Context(), id, req.MetadataLocation, req.PreviousMetadataLocation, req.CommittedTableUUID(), snapshotIDPtr, schemaIDPtr); err != nil {
-			if errors.Is(err, storage.ErrCommitConflict) {
-				return writeError(c, fiber.StatusConflict, "CommitFailedException", "Commit failed: table pointer conflict or concurrent update")
-			}
-			return writeError(c, fiber.StatusInternalServerError, "InternalServerError", err.Error())
-		}
-
-		if !queue.Submit(engine.CommitTask{
-			Table:            id,
-			MetadataLocation: req.MetadataLocation,
-			SnapshotID:       req.CommittedSnapshotID(),
-		}) {
-			c.Set("Retry-After", "1")
-			return writeError(c, fiber.StatusTooManyRequests, "QueueSaturatedException", "Ingestion queue is saturated. Please retry with backoff.")
 		}
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{

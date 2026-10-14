@@ -152,6 +152,43 @@ func (m *fakeCatalog) SaveTableCommit(ctx context.Context, id domain.TableIdenti
 	return nil
 }
 
+func (m *fakeCatalog) CommitTableTransaction(ctx context.Context, id domain.TableIdentifier, req *domain.UpdateTableRequest, onBeforeCommit func() error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 1. Validate requirements
+	if err := m.ValidateRequirements(ctx, id, req.Requirements); err != nil {
+		return err
+	}
+
+	key := id.String()
+	curr, exists := m.pointers[key]
+	if req.PreviousMetadataLocation != "" && curr != req.PreviousMetadataLocation {
+		return storage.ErrCommitConflict
+	}
+	_ = exists
+
+	// 2. onBeforeCommit (e.g. queue check)
+	if onBeforeCommit != nil {
+		if err := onBeforeCommit(); err != nil {
+			return err
+		}
+	}
+
+	// 3. Persist pointer
+	m.pointers[key] = req.MetadataLocation
+	if u := req.CommittedTableUUID(); u != "" {
+		m.uuids[key] = u
+	}
+	if sID := req.CommittedSnapshotID(); sID != 0 {
+		m.snapshots[key] = sID
+	}
+	if scID := req.CommittedSchemaID(); scID != nil {
+		m.schemas[key] = *scID
+	}
+	return nil
+}
+
 func (m *fakeCatalog) SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error {
 	return m.SaveTableCommit(ctx, id, metadataLocation, previousLocation, "", nil, nil)
 }

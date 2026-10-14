@@ -19,6 +19,7 @@ type CatalogStore interface {
 	ValidateRequirements(ctx context.Context, id domain.TableIdentifier, reqs []domain.TableRequirement) error
 	SaveTablePointer(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string) error
 	SaveTableCommit(ctx context.Context, id domain.TableIdentifier, metadataLocation, previousLocation string, tableUUID string, snapshotID *int64, schemaID *int) error
+	CommitTableTransaction(ctx context.Context, id domain.TableIdentifier, req *domain.UpdateTableRequest, onBeforeCommit func() error) error
 	Close()
 }
 
@@ -196,4 +197,149 @@ func (s *PostgresCatalogStore) SaveTableCommit(ctx context.Context, id domain.Ta
 		return ErrCommitConflict
 	}
 	return nil
+}
+
+// CommitTableTransaction executes requirements validation and pointer persistence within an atomic
+// transaction using SELECT ... FOR UPDATE. If onBeforeCommit is provided, it is invoked before committing.
+func (s *PostgresCatalogStore) CommitTableTransaction(ctx context.Context, id domain.TableIdentifier, req *domain.UpdateTableRequest, onBeforeCommit func() error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin commit transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// 1. Lock table row if it exists
+	lockQuery := `
+	SELECT metadata_location, table_uuid, current_snapshot_id, current_schema_id
+	FROM catalog_tables
+	WHERE namespace = $1 AND table_name = $2
+	FOR UPDATE;
+	`
+	var (
+		loc        string
+		currUUID   *string
+		currSnapID *int64
+		currSchema *int
+	)
+
+	err = tx.QueryRow(ctx, lockQuery, id.Namespace, id.Table).Scan(&loc, &currUUID, &currSnapID, &currSchema)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("failed to lock catalog table: %w", err)
+	}
+	tableExists := err == nil
+
+	// 2. Validate optimistic concurrency requirements
+	for _, r := range req.Requirements {
+		switch r.Type {
+		case "assert-create":
+			if tableExists {
+				return fmt.Errorf("%w: requirement failed: table %s already exists", ErrCommitConflict, id.String())
+			}
+		case "assert-table-uuid":
+			if !tableExists {
+				return fmt.Errorf("%w: requirement failed: table %s does not exist", ErrCommitConflict, id.String())
+			}
+			actual := ""
+			if currUUID != nil {
+				actual = *currUUID
+			}
+			if r.UUID != "" && actual != r.UUID {
+				return fmt.Errorf("%w: requirement failed: table UUID does not match (expected %s, got %s)", ErrCommitConflict, r.UUID, actual)
+			}
+		case "assert-ref-snapshot-id":
+			if !tableExists {
+				if r.SnapshotID != nil && *r.SnapshotID != -1 {
+					return fmt.Errorf("%w: requirement failed: table %s does not exist for ref %s", ErrCommitConflict, id.String(), r.Ref)
+				}
+			} else {
+				if r.SnapshotID == nil || *r.SnapshotID == -1 {
+					if currSnapID != nil {
+						return fmt.Errorf("%w: requirement failed: branch %s expected null snapshot but was %d", ErrCommitConflict, r.Ref, *currSnapID)
+					}
+				} else {
+					expected := *r.SnapshotID
+					if currSnapID == nil || *currSnapID != expected {
+						actual := int64(0)
+						if currSnapID != nil {
+							actual = *currSnapID
+						}
+						return fmt.Errorf("%w: requirement failed: branch %s was %d but expected %d", ErrCommitConflict, r.Ref, actual, expected)
+					}
+				}
+			}
+		case "assert-current-schema-id":
+			if !tableExists {
+				return fmt.Errorf("%w: requirement failed: table %s does not exist", ErrCommitConflict, id.String())
+			}
+			if r.CurrentSchemaID != nil {
+				if currSchema == nil || *currSchema != *r.CurrentSchemaID {
+					actual := 0
+					if currSchema != nil {
+						actual = *currSchema
+					}
+					return fmt.Errorf("%w: requirement failed: current schema id mismatch (expected %d, got %d)", ErrCommitConflict, *r.CurrentSchemaID, actual)
+				}
+			}
+		}
+	}
+
+	var snapshotIDPtr *int64
+	if sID := req.CommittedSnapshotID(); sID != 0 {
+		snapshotIDPtr = &sID
+	}
+	var schemaIDPtr *int
+	if sID := req.CommittedSchemaID(); sID != nil {
+		schemaIDPtr = sID
+	}
+	tableUUID := req.CommittedTableUUID()
+
+	// 3. Persist pointer: INSERT if new, UPDATE if existing
+	if !tableExists {
+		insertQuery := `
+		INSERT INTO catalog_tables (namespace, table_name, metadata_location, previous_metadata_location, table_uuid, current_snapshot_id, current_schema_id, updated_at)
+		VALUES ($1, $2, $3, '', NULLIF($4, ''), $5, $6, CURRENT_TIMESTAMP)
+		ON CONFLICT (namespace, table_name) DO NOTHING;
+		`
+		tag, err := tx.Exec(ctx, insertQuery, id.Namespace, id.Table, req.MetadataLocation, tableUUID, snapshotIDPtr, schemaIDPtr)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrCommitConflict
+		}
+	} else {
+		// Table exists: update pointer using locked row state
+		prevLoc := req.PreviousMetadataLocation
+		if prevLoc == "" {
+			prevLoc = loc
+		}
+		updateQuery := `
+		UPDATE catalog_tables
+		SET metadata_location = $1,
+		    previous_metadata_location = $2,
+		    table_uuid = COALESCE(NULLIF($3, ''), table_uuid),
+		    current_snapshot_id = COALESCE($4, current_snapshot_id),
+		    current_schema_id = COALESCE($5, current_schema_id),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE namespace = $6
+		  AND table_name = $7
+		  AND metadata_location = $2;
+		`
+		tag, err := tx.Exec(ctx, updateQuery, req.MetadataLocation, prevLoc, tableUUID, snapshotIDPtr, schemaIDPtr, id.Namespace, id.Table)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrCommitConflict
+		}
+	}
+
+	// 4. Before-commit check (e.g. check queue capacity)
+	if onBeforeCommit != nil {
+		if err := onBeforeCommit(); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
 }

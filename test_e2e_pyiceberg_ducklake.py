@@ -97,34 +97,66 @@ def test_e2e_write_pyiceberg_read_ducklake():
     metadata_location = table.metadata_location
     snapshot_id = current_snap.snapshot_id
 
-    print(f"  -> Append complete!")
-    print(f"  -> Snapshot ID: {snapshot_id}")
-    print(f"  -> New Metadata Location: {metadata_location}")
+    print(f"  -> Append Batch 1 complete!")
+    print(f"  -> Snapshot ID (Batch 1): {snapshot_id}")
+    print(f"  -> Metadata Location: {metadata_location}")
 
-    # -------------------------------------------------------------------------
-    # STEP 3: Send HTTP Commit Request to Bifrost Proxy (Iceberg REST API)
-    # -------------------------------------------------------------------------
-    print(f"\n[3/4] Sending Commit POST to Bifrost Proxy: {BIFROST_PROXY_URL}...")
-    commit_payload = {
+    # Send Commit 1 to Bifrost Proxy
+    print(f"\n[3/5] Sending Commit 1 POST to Bifrost Proxy: {BIFROST_PROXY_URL}...")
+    commit_payload_1 = {
         "requirements": [],
         "updates": [
             {"action": "set-current-snapshot", "snapshot-id": snapshot_id}
         ],
         "metadata-location": metadata_location,
     }
-
     commit_url = f"{BIFROST_PROXY_URL}/v1/namespaces/{namespace}/tables/{table_name}"
-    resp = requests.post(commit_url, json=commit_payload)
+    resp1 = requests.post(commit_url, json=commit_payload_1)
+    print(f"  -> HTTP Response Code: {resp1.status_code}")
+    assert resp1.status_code == 200, f"Commit 1 failed: {resp1.text}"
+    print("  -> Commit 1 verified successfully!")
 
-    print(f"  -> HTTP Response Code: {resp.status_code}")
-    print(f"  -> Response Body: {resp.text}")
-    assert resp.status_code == 200, f"Bifrost Proxy commit failed: {resp.text}"
-    print("  -> Commit through Bifrost Proxy verified successfully!")
+    # -------------------------------------------------------------------------
+    # STEP 3: Append Batch 2 (2 more records) & Send Commit 2 (Consecutive Commit)
+    # -------------------------------------------------------------------------
+    print("\n[3.5/5] Appending Batch 2 (2 records) via PyIceberg...")
+    records_batch2 = pa.Table.from_arrays(
+        [
+            pa.array([104, 105], type=pa.int64()),
+            pa.array(["Kafka", "ClickHouse"], type=pa.string()),
+            pa.array([777.00, 50.00], type=pa.float64()),
+            pa.array([1700000003000000, 1700000004000000], type=pa.timestamp('us')),
+            pa.array([Decimal("77.70"), Decimal("5.00")], type=pa.decimal128(10, 2)),
+        ],
+        schema=schema.as_arrow(),
+    )
+    table.append(records_batch2)
+    table.refresh()
+
+    current_snap2 = table.current_snapshot()
+    metadata_location_2 = table.metadata_location
+    snapshot_id_2 = current_snap2.snapshot_id
+    print(f"  -> Append Batch 2 complete!")
+    print(f"  -> Snapshot ID (Batch 2): {snapshot_id_2}")
+    print(f"  -> Metadata Location 2: {metadata_location_2}")
+
+    print(f"  -> Sending Commit 2 POST to Bifrost Proxy (validating Bug 01 CAS & Bug 03 Delta)...")
+    commit_payload_2 = {
+        "requirements": [],
+        "updates": [
+            {"action": "set-current-snapshot", "snapshot-id": snapshot_id_2}
+        ],
+        "metadata-location": metadata_location_2,
+    }
+    resp2 = requests.post(commit_url, json=commit_payload_2)
+    print(f"  -> HTTP Response Code: {resp2.status_code}")
+    assert resp2.status_code == 200, f"Commit 2 failed: {resp2.text}"
+    print("  -> Commit 2 verified successfully!")
 
     # -------------------------------------------------------------------------
     # STEP 4: Contrast & Verify: Reading via Iceberg vs Reading via Pure DuckLake
     # -------------------------------------------------------------------------
-    print("\n[4/4] Comparing Query Paths:")
+    print("\n[4/5] Comparing Query Paths:")
     
     # 4.1. Reading via Iceberg Engine (iceberg_scan)
     print("\n  [4.1] Query Path 1: Iceberg Protocol (`iceberg_scan` from MinIO):")
@@ -143,7 +175,7 @@ def test_e2e_write_pyiceberg_read_ducklake():
         );
     """)
     iceberg_rows = iceberg_conn.execute(
-        f"SELECT order_id, customer_name, amount, tax, created_at FROM iceberg_scan('{metadata_location}') ORDER BY order_id;"
+        f"SELECT order_id, customer_name, amount, tax, created_at FROM iceberg_scan('{metadata_location_2}') ORDER BY order_id;"
     ).fetchall()
     for order_id, customer_name, amount, tax, created_at in iceberg_rows:
         print(f"    [Iceberg] Order #{order_id}: {customer_name} | Price: ${amount} | Tax: ${tax} | Time: {created_at}")
@@ -179,24 +211,24 @@ def test_e2e_write_pyiceberg_read_ducklake():
     # Deterministic polling: poll until table is visible and populated by async worker
     print(f"        -> Deterministic polling for prod_lake.{namespace}.{table_name}...")
     ducklake_rows = []
-    max_retries = 30
+    max_retries = 50
     for attempt in range(max_retries):
         try:
             ducklake_rows = pure_ducklake_reader.execute(
                 f"SELECT order_id, customer_name, amount, tax, created_at FROM prod_lake.{namespace}.{table_name} ORDER BY order_id;"
             ).fetchall()
-            if len(ducklake_rows) == len(iceberg_rows):
-                print(f"        -> Table query resolved successfully on attempt {attempt+1}!")
+            if len(ducklake_rows) == len(iceberg_rows) and len(ducklake_rows) == 5:
+                print(f"        -> Table query resolved successfully on attempt {attempt+1} (Rows: {len(ducklake_rows)})!")
                 break
         except Exception:
             pass
-        time.sleep(0.1)
+        time.sleep(0.2)
 
     for order_id, customer_name, amount, tax, created_at in ducklake_rows:
         print(f"    [DuckLake] Order #{order_id}: {customer_name} | Price: ${amount} | Tax: ${tax} | Time: {created_at}")
     pure_ducklake_reader.close()
 
-    assert len(ducklake_rows) == 3, f"Unexpected DuckLake row count: {len(ducklake_rows)}"
+    assert len(ducklake_rows) == 5, f"Unexpected DuckLake row count: {len(ducklake_rows)} (expected 5 across 2 appends)"
     assert ducklake_rows == iceberg_rows, "Data between Iceberg and Pure DuckLake does not match!"
 
     print("\n======================================================================")

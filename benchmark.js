@@ -45,7 +45,7 @@ export default function () {
   });
 
   check(commitRes, {
-    'commit status is 200 or 409': (r) => r.status === 200 || r.status === 409,
+    'commit status is strictly 200': (r) => r.status === 200,
     'commit latency < 15ms': (r) => r.timings.duration < 15,
   });
 

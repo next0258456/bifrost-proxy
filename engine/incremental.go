@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -124,6 +123,9 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	if meta == nil {
 		meta, _ = ParseMetadataFile(task.MetadataLocation)
 	}
+	if meta == nil {
+		return fmt.Errorf("cannot sync table %s: metadata file could not be loaded from %s", task.Table, task.MetadataLocation)
+	}
 
 	// 2. Trích xuất đúng Snapshot và Summary delta thật
 	snapshotID := task.SnapshotID
@@ -241,13 +243,15 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 
 	// 5. Trích xuất file Parquet THẬT từ metadata / Avro manifest list & manifests
 	var dataFiles []ManifestDataFile
+	var deletedPaths []string
 
 	if targetSnap != nil && targetSnap.ManifestList != "" && e.store != nil {
-		mFiles, err := ExtractDataFilesFromStorage(context.Background(), e.store, targetSnap.ManifestList, snapshotID)
+		mFiles, dFiles, err := ExtractDataFilesFromStorage(context.Background(), e.store, targetSnap.ManifestList, snapshotID)
 		if err != nil {
 			log.Printf("Warning: error reading Avro manifest files: %v", err)
 		} else {
 			dataFiles = append(dataFiles, mFiles...)
+			deletedPaths = append(deletedPaths, dFiles...)
 		}
 	}
 
@@ -260,6 +264,26 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 				Content:         f.Content,
 				ReferencedPath:  f.ReferencedPath,
 			})
+		}
+	}
+
+	// Đóng end_snapshot cho các file dữ liệu đã bị xóa (Compaction / Overwrite)
+	for _, delPath := range deletedPaths {
+		closeDataFileSQL := `
+			UPDATE ducklake_catalog.ducklake_data_file 
+			SET end_snapshot = $1 
+			WHERE table_id = $2 AND path = $3 AND end_snapshot IS NULL;
+		`
+		if _, err := e.db.Exec(closeDataFileSQL, snapshotID, tableID, delPath); err != nil {
+			log.Printf("Warning: failed to close end_snapshot for deleted data file %s: %v", delPath, err)
+		}
+		closeDeleteFileSQL := `
+			UPDATE ducklake_catalog.ducklake_delete_file 
+			SET end_snapshot = $1 
+			WHERE table_id = $2 AND path = $3 AND end_snapshot IS NULL;
+		`
+		if _, err := e.db.Exec(closeDeleteFileSQL, snapshotID, tableID, delPath); err != nil {
+			log.Printf("Warning: failed to close end_snapshot for deleted delete file %s: %v", delPath, err)
 		}
 	}
 
@@ -285,15 +309,13 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 			}
 			nextFileID++
 		} else if df.Content == 1 { // 1 = Delete v2 (Position Deletes)
-			var refDataFileID int64 = 1
-			if df.ReferencedPath != "" {
-				if err := e.db.QueryRow("SELECT data_file_id FROM ducklake_catalog.ducklake_data_file WHERE path = $1 LIMIT 1;", df.ReferencedPath).Scan(&refDataFileID); err != nil && err != sql.ErrNoRows {
-					return fmt.Errorf("failed to resolve refDataFileID for path %s: %w", df.ReferencedPath, err)
-				}
-			} else {
-				if err := e.db.QueryRow("SELECT COALESCE(MAX(data_file_id), 1) FROM ducklake_catalog.ducklake_data_file WHERE table_id = $1;", tableID).Scan(&refDataFileID); err != nil && err != sql.ErrNoRows {
-					return fmt.Errorf("failed to query fallback refDataFileID for table_id %d: %w", tableID, err)
-				}
+			if df.ReferencedPath == "" {
+				return fmt.Errorf("position delete file %s has no referenced data file path", df.Path)
+			}
+			var refDataFileID int64
+			err := e.db.QueryRow("SELECT data_file_id FROM ducklake_catalog.ducklake_data_file WHERE path = $1 LIMIT 1;", df.ReferencedPath).Scan(&refDataFileID)
+			if err != nil {
+				return fmt.Errorf("failed to resolve referenced data file ID for position delete %s (path: %s): %w", df.Path, df.ReferencedPath, err)
 			}
 
 			deleteFileSQL := `
