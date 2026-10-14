@@ -62,6 +62,63 @@ type DataFileEntry struct {
 // MapIcebergTypeToDuckLake converts standard Iceberg schema data types to DuckLake SQL types
 func MapIcebergTypeToDuckLake(icebergType string) string {
 	raw := strings.ToLower(strings.TrimSpace(icebergType))
+	if raw == "" {
+		return "varchar"
+	}
+
+	// 1. Timezone-aware timestamps
+	if raw == "timestamptz" || strings.Contains(raw, "with time zone") || strings.HasPrefix(raw, "timestamp_tz") {
+		return "timestamptz"
+	}
+
+	// 2. Complex & Nested Types: list<T> or array<T>
+	if (strings.HasPrefix(raw, "list<") || strings.HasPrefix(raw, "array<")) && strings.HasSuffix(raw, ">") {
+		prefixLen := 5
+		if strings.HasPrefix(raw, "array<") {
+			prefixLen = 6
+		}
+		inner := strings.TrimSpace(raw[prefixLen : len(raw)-1])
+		return MapIcebergTypeToDuckLake(inner) + "[]"
+	}
+
+	// 3. Complex Types: map<K, V>
+	if strings.HasPrefix(raw, "map<") && strings.HasSuffix(raw, ">") {
+		inner := strings.TrimSpace(raw[4 : len(raw)-1])
+		parts := splitTopLevelComma(inner)
+		if len(parts) == 2 {
+			keyType := MapIcebergTypeToDuckLake(parts[0])
+			valType := MapIcebergTypeToDuckLake(parts[1])
+			return fmt.Sprintf("MAP(%s, %s)", keyType, valType)
+		}
+	}
+
+	// 4. Complex Types: struct<f1: t1, f2: t2>
+	if strings.HasPrefix(raw, "struct<") && strings.HasSuffix(raw, ">") {
+		inner := strings.TrimSpace(raw[7 : len(raw)-1])
+		parts := splitTopLevelComma(inner)
+		var structFields []string
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			colonIdx := strings.Index(part, ":")
+			if colonIdx > 0 {
+				fieldName := strings.TrimSpace(part[:colonIdx])
+				fieldType := MapIcebergTypeToDuckLake(strings.TrimSpace(part[colonIdx+1:]))
+				structFields = append(structFields, fmt.Sprintf("%s %s", fieldName, fieldType))
+			} else {
+				spaceIdx := strings.Index(part, " ")
+				if spaceIdx > 0 {
+					fieldName := strings.TrimSpace(part[:spaceIdx])
+					fieldType := MapIcebergTypeToDuckLake(strings.TrimSpace(part[spaceIdx+1:]))
+					structFields = append(structFields, fmt.Sprintf("%s %s", fieldName, fieldType))
+				} else if part != "" {
+					structFields = append(structFields, part)
+				}
+			}
+		}
+		return fmt.Sprintf("STRUCT(%s)", strings.Join(structFields, ", "))
+	}
+
+	// 5. Primitive Types
 	switch {
 	case raw == "long" || raw == "bigint":
 		return "int64"
@@ -81,7 +138,7 @@ func MapIcebergTypeToDuckLake(icebergType string) string {
 		return "date"
 	case raw == "time":
 		return "time"
-	case raw == "timestamp" || raw == "timestamptz" || strings.HasPrefix(raw, "timestamp"):
+	case strings.HasPrefix(raw, "timestamp"):
 		return "timestamp"
 	case raw == "uuid":
 		return "uuid"
@@ -89,9 +146,35 @@ func MapIcebergTypeToDuckLake(icebergType string) string {
 		return "blob"
 	case strings.HasPrefix(raw, "decimal"):
 		return raw
+	case raw == "json":
+		return "json"
 	default:
 		return raw
 	}
+}
+
+// splitTopLevelComma splits a string on commas that are not nested within <>, (), or []
+func splitTopLevelComma(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i, r := range s {
+		switch r {
+		case '<', '(', '[':
+			depth++
+		case '>', ')', ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	if start < len(s) {
+		parts = append(parts, strings.TrimSpace(s[start:]))
+	}
+	return parts
 }
 
 // allocateNextID generates the next incremental identifier for a catalog table within a transaction

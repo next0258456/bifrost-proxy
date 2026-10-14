@@ -4,11 +4,11 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] `MapIcebergTypeToDuckLake` supports timezone-aware timestamps: `timestamptz`, `timestamp with time zone`, and `timestamp_ns` mapping to `timestamptz`.
-- [ ] Recursively unwraps `list<T>` and `array<T>` into DuckDB array notation `T[]` (e.g., `list<string>` -> `varchar[]`, `list<list<int>>` -> `int32[][]`).
-- [ ] Maps `map<K, V>` into DuckDB map notation `MAP(K, V)` with recursive conversion of key and value types.
-- [ ] Handles `struct<...>` and `json` types cleanly.
-- [ ] Provides a safe fallback to `varchar` or sanitized string for unrecognized types, preventing invalid SQL tokens from reaching `ducklake_column.column_type`.
-- [ ] Comprehensive unit tests cover all primitive types, nested lists, maps, timezone timestamps, and fallback cases.
+- [x] `MapIcebergTypeToDuckLake` supports timezone-aware timestamps: `timestamptz`, `timestamp with time zone`, and `timestamp_ns` mapping to `timestamptz`.
+- [x] Recursively unwraps `list<T>` and `array<T>` into DuckDB array notation `T[]` (e.g., `list<string>` -> `varchar[]`, `list<list<int>>` -> `int32[][]`).
+- [x] Maps `map<K, V>` into DuckDB map notation `MAP(K, V)` with recursive conversion of key and value types.
+- [x] Handles `struct<...>` and `json` types cleanly.
+- [x] Provides a safe fallback to `varchar` or sanitized string for unrecognized types, preventing invalid SQL tokens from reaching `ducklake_column.column_type`.
+- [x] Comprehensive unit tests cover all primitive types, nested lists, maps, timezone timestamps, and fallback cases.
