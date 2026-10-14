@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Implement `DecodeIcebergBinaryBound(rawBytes []byte, icebergType string) (string, error)` supporting `int`, `long`, `float`, `double`, `boolean`, `date`, `time`, `timestamp`, `timestamptz`, `string`, `uuid`, and `decimal(P, S)`.
-- [ ] Connect column type lookup from active schema fields so bounds are parsed using their actual column types rather than raw UTF-8 string casting.
-- [ ] Ingest decoded `min_value` and `max_value` into `ducklake_file_column_stats`.
-- [ ] Add unit tests in `engine/manifest_test.go` covering binary bounds fixtures for all supported types (int32, int64, float32, float64, date, timestamp, boolean, string).
-- [ ] Verify that non-string bounds are no longer stored as NULL in `ducklake_file_column_stats`.
+- [x] Implement `DecodeIcebergBinaryBound(rawBytes []byte, icebergType string) (string, error)` supporting `int`, `long`, `float`, `double`, `boolean`, `date`, `time`, `timestamp`, `timestamptz`, `string`, `uuid`, and `decimal(P, S)`.
+- [x] Connect column type lookup from active schema fields so bounds are parsed using their actual column types rather than raw UTF-8 string casting.
+- [x] Ingest decoded `min_value` and `max_value` into `ducklake_file_column_stats`.
+- [x] Add unit tests in `engine/manifest_test.go` covering binary bounds fixtures for all supported types (int32, int64, float32, float64, date, timestamp, boolean, string).
+- [x] Verify that non-string bounds are no longer stored as NULL in `ducklake_file_column_stats`.

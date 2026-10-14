@@ -3,12 +3,19 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
+	"math"
+	"math/big"
 	"strconv"
+	"strings"
+	"time"
 	"unicode/utf8"
 
 	"bifrost-proxy/storage"
 
+	"github.com/google/uuid"
 	"github.com/linkedin/goavro/v2"
 )
 
@@ -29,6 +36,135 @@ type ManifestDataFile struct {
 	Content         int    // 0 = data, 1 = position deletes, 2 = equality deletes
 	ReferencedPath  string // field 2147483546 if delete file
 	ColumnStats     []ManifestColumnStats
+}
+
+// DecodeIcebergBinaryBound deserializes raw bytes into a canonical string value
+// according to Iceberg Single-Value Serialization Spec.
+func DecodeIcebergBinaryBound(rawBytes []byte, icebergType string) (string, error) {
+	if len(rawBytes) == 0 {
+		return "", nil
+	}
+	t := strings.ToLower(strings.TrimSpace(icebergType))
+	switch {
+	case t == "boolean":
+		if rawBytes[0] == 0x01 {
+			return "true", nil
+		}
+		return "false", nil
+
+	case t == "int" || t == "integer" || t == "int32":
+		if len(rawBytes) < 4 {
+			return "", fmt.Errorf("invalid byte length for int: %d", len(rawBytes))
+		}
+		val := int32(binary.LittleEndian.Uint32(rawBytes))
+		return strconv.FormatInt(int64(val), 10), nil
+
+	case t == "long" || t == "bigint" || t == "int64":
+		if len(rawBytes) < 8 {
+			return "", fmt.Errorf("invalid byte length for long: %d", len(rawBytes))
+		}
+		val := int64(binary.LittleEndian.Uint64(rawBytes))
+		return strconv.FormatInt(val, 10), nil
+
+	case t == "float" || t == "float32":
+		if len(rawBytes) < 4 {
+			return "", fmt.Errorf("invalid byte length for float: %d", len(rawBytes))
+		}
+		bits := binary.LittleEndian.Uint32(rawBytes)
+		val := math.Float32frombits(bits)
+		return strconv.FormatFloat(float64(val), 'g', -1, 32), nil
+
+	case t == "double" || t == "float64":
+		if len(rawBytes) < 8 {
+			return "", fmt.Errorf("invalid byte length for double: %d", len(rawBytes))
+		}
+		bits := binary.LittleEndian.Uint64(rawBytes)
+		val := math.Float64frombits(bits)
+		return strconv.FormatFloat(val, 'g', -1, 64), nil
+
+	case t == "date":
+		if len(rawBytes) < 4 {
+			return "", fmt.Errorf("invalid byte length for date: %d", len(rawBytes))
+		}
+		days := int32(binary.LittleEndian.Uint32(rawBytes))
+		d := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, int(days))
+		return d.Format("2006-01-02"), nil
+
+	case t == "time":
+		if len(rawBytes) < 8 {
+			return "", fmt.Errorf("invalid byte length for time: %d", len(rawBytes))
+		}
+		us := int64(binary.LittleEndian.Uint64(rawBytes))
+		totalSec := us / 1000000
+		remUS := us % 1000000
+		hr := totalSec / 3600
+		min := (totalSec % 3600) / 60
+		sec := totalSec % 60
+		if remUS > 0 {
+			return fmt.Sprintf("%02d:%02d:%02d.%06d", hr, min, sec, remUS), nil
+		}
+		return fmt.Sprintf("%02d:%02d:%02d", hr, min, sec), nil
+
+	case strings.HasPrefix(t, "timestamp"):
+		if len(rawBytes) < 8 {
+			return "", fmt.Errorf("invalid byte length for timestamp: %d", len(rawBytes))
+		}
+		us := int64(binary.LittleEndian.Uint64(rawBytes))
+		tm := time.UnixMicro(us).UTC()
+		return tm.Format("2006-01-02 15:04:05.000000"), nil
+
+	case t == "string" || t == "varchar":
+		if utf8.Valid(rawBytes) {
+			return string(rawBytes), nil
+		}
+		return "", fmt.Errorf("invalid utf8 sequence for string")
+
+	case t == "uuid":
+		if len(rawBytes) == 16 {
+			u, err := uuid.FromBytes(rawBytes)
+			if err != nil {
+				return "", err
+			}
+			return u.String(), nil
+		}
+		return "", fmt.Errorf("invalid byte length for uuid: %d", len(rawBytes))
+
+	case strings.HasPrefix(t, "decimal"):
+		unscaled := new(big.Int).SetBytes(rawBytes)
+		if len(rawBytes) > 0 && (rawBytes[0]&0x80) != 0 {
+			limit := new(big.Int).Lsh(big.NewInt(1), uint(8*len(rawBytes)))
+			unscaled.Sub(unscaled, limit)
+		}
+		scale := 0
+		if idx := strings.Index(t, ","); idx > 0 {
+			scaleStr := strings.TrimRight(strings.TrimSpace(t[idx+1:]), ")")
+			scale, _ = strconv.Atoi(scaleStr)
+		}
+		if scale <= 0 {
+			return unscaled.String(), nil
+		}
+		sign := ""
+		if unscaled.Sign() < 0 {
+			sign = "-"
+			unscaled.Abs(unscaled)
+		}
+		str := unscaled.String()
+		if len(str) <= scale {
+			str = strings.Repeat("0", scale-len(str)+1) + str
+		}
+		intPart := str[:len(str)-scale]
+		fracPart := str[len(str)-scale:]
+		return sign + intPart + "." + fracPart, nil
+
+	case t == "binary" || strings.HasPrefix(t, "fixed"):
+		return hex.EncodeToString(rawBytes), nil
+
+	default:
+		if utf8.Valid(rawBytes) {
+			return string(rawBytes), nil
+		}
+		return hex.EncodeToString(rawBytes), nil
+	}
 }
 
 // extractMapOrArray parses Avro maps or arrays of key/value pairs into map[int64]interface{}
@@ -139,6 +275,11 @@ const IcebergReferencedDataFilePathFieldID int64 = 2147483546
 
 // ReadManifestFile parses an Iceberg manifest Avro file and returns added files and deleted paths.
 func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, err error) {
+	return ReadManifestFileWithColTypes(data, nil)
+}
+
+// ReadManifestFileWithColTypes parses an Iceberg manifest Avro file with column types for bounds decoding.
+func ReadManifestFileWithColTypes(data []byte, colTypes map[int64]string) (added []ManifestDataFile, deleted []string, err error) {
 	ocf, err := goavro.NewOCFReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create OCF reader for manifest: %w", err)
@@ -261,13 +402,24 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 
 		allColIDs := collectUniqueKeys(colSizes, valCounts, nullCounts, nanCounts, lowerBounds, upperBounds)
 
-		formatBound := func(v interface{}) *string {
+		formatBound := func(v interface{}, colID int64) *string {
 			if v == nil {
 				return nil
 			}
 			unwrapped := unwrapAvroUnion(v)
 			if b, ok := unwrapped.([]byte); ok {
-				if len(b) > 0 && utf8.Valid(b) {
+				if len(b) == 0 {
+					return nil
+				}
+				var colType string
+				if colTypes != nil {
+					colType = colTypes[colID]
+				}
+				decoded, err := DecodeIcebergBinaryBound(b, colType)
+				if err == nil && decoded != "" {
+					return &decoded
+				}
+				if utf8.Valid(b) {
 					s := string(b)
 					return &s
 				}
@@ -307,8 +459,8 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 					stat.ContainsNaN = &hasNan
 				}
 			}
-			stat.MinValue = formatBound(lowerBounds[colID])
-			stat.MaxValue = formatBound(upperBounds[colID])
+			stat.MinValue = formatBound(lowerBounds[colID], colID)
+			stat.MaxValue = formatBound(upperBounds[colID], colID)
 
 			manifestDataFile.ColumnStats = append(manifestDataFile.ColumnStats, stat)
 		}
@@ -320,6 +472,11 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 
 // ExtractDataFilesFromStorage traverses manifest list and manifests via StorageService.
 func ExtractDataFilesFromStorage(ctx context.Context, store storage.StorageService, manifestListLocation string, snapshotID int64) (added []ManifestDataFile, deleted []string, err error) {
+	return ExtractDataFilesFromStorageWithColTypes(ctx, store, manifestListLocation, snapshotID, nil)
+}
+
+// ExtractDataFilesFromStorageWithColTypes traverses manifest list and manifests using column types for bounds decoding.
+func ExtractDataFilesFromStorageWithColTypes(ctx context.Context, store storage.StorageService, manifestListLocation string, snapshotID int64, colTypes map[int64]string) (added []ManifestDataFile, deleted []string, err error) {
 	if store == nil || manifestListLocation == "" {
 		return nil, nil, nil
 	}
@@ -339,7 +496,7 @@ func ExtractDataFilesFromStorage(ctx context.Context, store storage.StorageServi
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read manifest file %s: %w", mPath, err)
 		}
-		addedFiles, deletedFiles, err := ReadManifestFile(mBytes)
+		addedFiles, deletedFiles, err := ReadManifestFileWithColTypes(mBytes, colTypes)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to parse manifest file %s: %w", mPath, err)
 		}

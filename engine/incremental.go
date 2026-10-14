@@ -393,7 +393,14 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 	var deletedPaths []string
 
 	if targetSnap != nil && targetSnap.ManifestList != "" && e.store != nil {
-		extractedDataFiles, extractedDeletedPaths, err := ExtractDataFilesFromStorage(context.Background(), e.store, targetSnap.ManifestList, snapshotID)
+		var colTypes map[int64]string
+		if activeSchema != nil {
+			colTypes = make(map[int64]string)
+			for _, f := range activeSchema.Fields {
+				colTypes[int64(f.ID)] = f.Type
+			}
+		}
+		extractedDataFiles, extractedDeletedPaths, err := ExtractDataFilesFromStorageWithColTypes(context.Background(), e.store, targetSnap.ManifestList, snapshotID, colTypes)
 		if err != nil {
 			return fmt.Errorf("failed to extract manifest files from storage for %s: %w", targetSnap.ManifestList, err)
 		}

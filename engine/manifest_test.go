@@ -2,7 +2,9 @@ package engine
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/linkedin/goavro/v2"
@@ -532,5 +534,190 @@ func TestExtractColumnBoundsStats(t *testing.T) {
 	assert.Equal(t, int64(5), *col2.NullCount)
 	assert.Equal(t, "Alice", *col2.MinValue)
 	assert.Equal(t, "Zach", *col2.MaxValue)
+}
+
+func TestDecodeIcebergBinaryBound(t *testing.T) {
+	// Boolean
+	res, err := DecodeIcebergBinaryBound([]byte{0x01}, "boolean")
+	require.NoError(t, err)
+	assert.Equal(t, "true", res)
+
+	res, err = DecodeIcebergBinaryBound([]byte{0x00}, "boolean")
+	require.NoError(t, err)
+	assert.Equal(t, "false", res)
+
+	// Int32
+	intBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(intBuf, uint32(101))
+	res, err = DecodeIcebergBinaryBound(intBuf, "int")
+	require.NoError(t, err)
+	assert.Equal(t, "101", res)
+
+	// Int64 / Long
+	longBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(longBuf, uint64(10000000000))
+	res, err = DecodeIcebergBinaryBound(longBuf, "long")
+	require.NoError(t, err)
+	assert.Equal(t, "10000000000", res)
+
+	// Float32
+	f32Buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(f32Buf, math.Float32bits(250.5))
+	res, err = DecodeIcebergBinaryBound(f32Buf, "float")
+	require.NoError(t, err)
+	assert.Equal(t, "250.5", res)
+
+	// Float64 / Double
+	f64Buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(f64Buf, math.Float64bits(999.99))
+	res, err = DecodeIcebergBinaryBound(f64Buf, "double")
+	require.NoError(t, err)
+	assert.Equal(t, "999.99", res)
+
+	// Date (days from 1970-01-01)
+	dateBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(dateBuf, uint32(19680)) // 2023-11-19
+	res, err = DecodeIcebergBinaryBound(dateBuf, "date")
+	require.NoError(t, err)
+	assert.Equal(t, "2023-11-19", res)
+
+	// Timestamp (microseconds from epoch)
+	tsBuf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(tsBuf, uint64(1700000000000000))
+	res, err = DecodeIcebergBinaryBound(tsBuf, "timestamp")
+	require.NoError(t, err)
+	assert.Equal(t, "2023-11-14 22:13:20.000000", res)
+
+	// String
+	res, err = DecodeIcebergBinaryBound([]byte("CongAnh"), "string")
+	require.NoError(t, err)
+	assert.Equal(t, "CongAnh", res)
+
+	// Decimal(18, 2)
+	// 1250 cents = 12.50
+	decBytes := []byte{0x04, 0xe2} // 1250 in big-endian
+	res, err = DecodeIcebergBinaryBound(decBytes, "decimal(18, 2)")
+	require.NoError(t, err)
+	assert.Equal(t, "12.50", res)
+}
+
+func TestReadManifestFileWithColTypesAndBinaryBounds(t *testing.T) {
+	manifestSchema := `{
+		"type": "record",
+		"name": "manifest_entry",
+		"fields": [
+			{"name": "status", "type": "int"},
+			{"name": "snapshot_id", "type": ["null", "long"], "default": null},
+			{
+				"name": "data_file",
+				"type": {
+					"type": "record",
+					"name": "data_file_entry",
+					"fields": [
+						{"name": "file_path", "type": "string"},
+						{"name": "file_format", "type": "string"},
+						{"name": "record_count", "type": "long"},
+						{"name": "file_size_in_bytes", "type": "long"},
+						{"name": "content", "type": "int", "default": 0},
+						{
+							"name": "lower_bounds",
+							"type": [
+								"null",
+								{"type": "map", "values": "bytes"}
+							],
+							"default": null
+						},
+						{
+							"name": "upper_bounds",
+							"type": [
+								"null",
+								{"type": "map", "values": "bytes"}
+							],
+							"default": null
+						}
+					]
+				}
+			}
+		]
+	}`
+
+	buf := new(bytes.Buffer)
+	w, err := goavro.NewOCFWriter(goavro.OCFConfig{
+		W:      buf,
+		Schema: manifestSchema,
+	})
+	require.NoError(t, err)
+
+	// Col 1 = long (order_id: 101 .. 105)
+	minIDBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(minIDBytes, 101)
+	maxIDBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(maxIDBytes, 105)
+
+	// Col 2 = double (amount: 12.0 .. 999.99)
+	minAmtBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(minAmtBytes, math.Float64bits(12.0))
+	maxAmtBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(maxAmtBytes, math.Float64bits(999.99))
+
+	entries := []map[string]interface{}{
+		{
+			"status":      1,
+			"snapshot_id": map[string]interface{}{"long": int64(1001)},
+			"data_file": map[string]interface{}{
+				"file_path":          "s3://lakehouse/data/orders_1.parquet",
+				"file_format":        "PARQUET",
+				"record_count":       int64(5),
+				"file_size_in_bytes": int64(4096),
+				"content":            0,
+				"lower_bounds": map[string]interface{}{
+					"map": map[string]interface{}{
+						"1": minIDBytes,
+						"2": minAmtBytes,
+					},
+				},
+				"upper_bounds": map[string]interface{}{
+					"map": map[string]interface{}{
+						"1": maxIDBytes,
+						"2": maxAmtBytes,
+					},
+				},
+			},
+		},
+	}
+
+	err = w.Append(entries)
+	require.NoError(t, err)
+
+	colTypes := map[int64]string{
+		1: "long",
+		2: "double",
+	}
+
+	added, _, err := ReadManifestFileWithColTypes(buf.Bytes(), colTypes)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(added))
+
+	df := added[0]
+	require.Equal(t, 2, len(df.ColumnStats))
+
+	statsMap := make(map[int64]ManifestColumnStats)
+	for _, cs := range df.ColumnStats {
+		statsMap[cs.ColumnID] = cs
+	}
+
+	col1, ok1 := statsMap[1]
+	require.True(t, ok1)
+	require.NotNil(t, col1.MinValue)
+	require.NotNil(t, col1.MaxValue)
+	assert.Equal(t, "101", *col1.MinValue)
+	assert.Equal(t, "105", *col1.MaxValue)
+
+	col2, ok2 := statsMap[2]
+	require.True(t, ok2)
+	require.NotNil(t, col2.MinValue)
+	require.NotNil(t, col2.MaxValue)
+	assert.Equal(t, "12", *col2.MinValue)
+	assert.Equal(t, "999.99", *col2.MaxValue)
 }
 
