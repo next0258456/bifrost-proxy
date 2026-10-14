@@ -98,61 +98,77 @@ func (s *PostgresCatalogStore) ValidateRequirements(ctx context.Context, id doma
 	}
 	tableExists := err == nil
 
-	return validateTableRequirements(id, reqs, tableExists, currUUID, currSnapID, currSchema)
+	state := TableSnapshotState{
+		TableExists:       tableExists,
+		CurrentUUID:       currUUID,
+		CurrentSnapshotID: currSnapID,
+		CurrentSchemaID:   currSchema,
+	}
+	return validateTableRequirements(id, reqs, state)
 }
 
-func validateTableRequirements(id domain.TableIdentifier, reqs []domain.TableRequirement, tableExists bool, currUUID *string, currSnapID *int64, currSchema *int) error {
+// TableSnapshotState encapsulates current table snapshot state for requirements validation.
+type TableSnapshotState struct {
+	TableExists       bool
+	CurrentUUID       *string
+	CurrentSnapshotID *int64
+	CurrentSchemaID   *int
+}
+
+func validateTableRequirements(id domain.TableIdentifier, reqs []domain.TableRequirement, state TableSnapshotState) error {
 	for _, req := range reqs {
 		switch req.Type {
 		case "assert-create":
-			if tableExists {
+			if state.TableExists {
 				return fmt.Errorf("%w: requirement failed: table %s already exists", ErrCommitConflict, id.String())
 			}
 		case "assert-table-uuid":
-			if !tableExists {
+			if !state.TableExists {
 				return fmt.Errorf("%w: requirement failed: table %s does not exist", ErrCommitConflict, id.String())
 			}
 			actual := ""
-			if currUUID != nil {
-				actual = *currUUID
+			if state.CurrentUUID != nil {
+				actual = *state.CurrentUUID
 			}
 			if req.UUID != "" && actual != req.UUID {
 				return fmt.Errorf("%w: requirement failed: table UUID does not match (expected %s, got %s)", ErrCommitConflict, req.UUID, actual)
 			}
 		case "assert-ref-snapshot-id":
-			if !tableExists {
+			if !state.TableExists {
 				if req.SnapshotID != nil && *req.SnapshotID != -1 {
 					return fmt.Errorf("%w: requirement failed: table %s does not exist for ref %s", ErrCommitConflict, id.String(), req.Ref)
 				}
 			} else {
 				if req.SnapshotID == nil || *req.SnapshotID == -1 {
-					if currSnapID != nil {
-						return fmt.Errorf("%w: requirement failed: branch %s expected null snapshot but was %d", ErrCommitConflict, req.Ref, *currSnapID)
+					if state.CurrentSnapshotID != nil {
+						return fmt.Errorf("%w: requirement failed: branch %s expected null snapshot but was %d", ErrCommitConflict, req.Ref, *state.CurrentSnapshotID)
 					}
 				} else {
 					expected := *req.SnapshotID
-					if currSnapID == nil || *currSnapID != expected {
+					if state.CurrentSnapshotID == nil || *state.CurrentSnapshotID != expected {
 						actual := int64(0)
-						if currSnapID != nil {
-							actual = *currSnapID
+						if state.CurrentSnapshotID != nil {
+							actual = *state.CurrentSnapshotID
 						}
 						return fmt.Errorf("%w: requirement failed: branch %s was %d but expected %d", ErrCommitConflict, req.Ref, actual, expected)
 					}
 				}
 			}
 		case "assert-current-schema-id":
-			if !tableExists {
+			if !state.TableExists {
 				return fmt.Errorf("%w: requirement failed: table %s does not exist", ErrCommitConflict, id.String())
 			}
 			if req.CurrentSchemaID != nil {
-				if currSchema == nil || *currSchema != *req.CurrentSchemaID {
+				if state.CurrentSchemaID == nil || *state.CurrentSchemaID != *req.CurrentSchemaID {
 					actual := 0
-					if currSchema != nil {
-						actual = *currSchema
+					if state.CurrentSchemaID != nil {
+						actual = *state.CurrentSchemaID
 					}
 					return fmt.Errorf("%w: requirement failed: current schema id mismatch (expected %d, got %d)", ErrCommitConflict, *req.CurrentSchemaID, actual)
 				}
 			}
+		default:
+			// Unrecognized requirement types per Iceberg REST spec can be ignored or safely skipped
 		}
 	}
 	return nil
@@ -233,7 +249,13 @@ func (s *PostgresCatalogStore) CommitTableTransaction(ctx context.Context, id do
 	tableExists := err == nil
 
 	// 2. Validate optimistic concurrency requirements
-	if err := validateTableRequirements(id, req.Requirements, tableExists, currUUID, currSnapID, currSchema); err != nil {
+	state := TableSnapshotState{
+		TableExists:       tableExists,
+		CurrentUUID:       currUUID,
+		CurrentSnapshotID: currSnapID,
+		CurrentSchemaID:   currSchema,
+	}
+	if err := validateTableRequirements(id, req.Requirements, state); err != nil {
 		return err
 	}
 

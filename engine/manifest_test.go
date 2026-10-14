@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/linkedin/goavro/v2"
@@ -327,3 +328,83 @@ func TestReadManifestFileWithArrayBounds(t *testing.T) {
 	require.Equal(t, 1, len(added))
 	assert.Equal(t, "s3://lakehouse/data/target.parquet", added[0].ReferencedPath)
 }
+
+func TestReadManifestFileWithMapUnionEnvelope(t *testing.T) {
+	manifestFileSchema := `{
+		"type": "record",
+		"name": "manifest_entry",
+		"fields": [
+			{"name": "status", "type": "int"},
+			{"name": "snapshot_id", "type": ["null", "long"], "default": null},
+			{
+				"name": "data_file",
+				"type": {
+					"type": "record",
+					"name": "r104",
+					"fields": [
+						{"name": "file_path", "type": "string"},
+						{"name": "file_format", "type": "string"},
+						{"name": "record_count", "type": "long"},
+						{"name": "file_size_in_bytes", "type": "long"},
+						{"name": "content", "type": "int", "default": 0},
+						{
+							"name": "lower_bounds",
+							"type": [
+								"null",
+								{
+									"type": "map",
+									"values": ["null", "bytes"]
+								}
+							],
+							"default": null
+						},
+						{
+							"name": "upper_bounds",
+							"type": "null",
+							"default": null
+						}
+					]
+				}
+			}
+		]
+	}`
+
+	var buf bytes.Buffer
+	w, err := goavro.NewOCFWriter(goavro.OCFConfig{
+		W:      &buf,
+		Schema: manifestFileSchema,
+	})
+	require.NoError(t, err)
+
+	targetKey := fmt.Sprintf("%d", IcebergReferencedDataFilePathFieldID)
+	entries := []map[string]interface{}{
+		{
+			"status":      1,
+			"snapshot_id": map[string]interface{}{"long": int64(3001)},
+			"data_file": map[string]interface{}{
+				"file_path":          "s3://lakehouse/data/delete_map_union.parquet",
+				"file_format":        "PARQUET",
+				"record_count":       int64(5),
+				"file_size_in_bytes": int64(1500),
+				"content":            1,
+				"lower_bounds": map[string]interface{}{
+					"map": map[string]interface{}{
+						targetKey: map[string]interface{}{
+							"bytes": []byte("s3://lakehouse/data/map_target.parquet"),
+						},
+					},
+				},
+				"upper_bounds": nil,
+			},
+		},
+	}
+
+	err = w.Append(entries)
+	require.NoError(t, err)
+
+	added, _, err := ReadManifestFile(buf.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, 1, len(added))
+	assert.Equal(t, "s3://lakehouse/data/map_target.parquet", added[0].ReferencedPath)
+}
+

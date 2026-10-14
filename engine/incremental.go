@@ -246,12 +246,12 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	var deletedPaths []string
 
 	if targetSnap != nil && targetSnap.ManifestList != "" && e.store != nil {
-		mFiles, dFiles, err := ExtractDataFilesFromStorage(context.Background(), e.store, targetSnap.ManifestList, snapshotID)
+		extractedDataFiles, extractedDeletedPaths, err := ExtractDataFilesFromStorage(context.Background(), e.store, targetSnap.ManifestList, snapshotID)
 		if err != nil {
 			return fmt.Errorf("failed to extract manifest files from storage for %s: %w", targetSnap.ManifestList, err)
 		}
-		dataFiles = append(dataFiles, mFiles...)
-		deletedPaths = append(deletedPaths, dFiles...)
+		dataFiles = append(dataFiles, extractedDataFiles...)
+		deletedPaths = append(deletedPaths, extractedDeletedPaths...)
 	}
 
 	if len(dataFiles) == 0 && targetSnap != nil && len(targetSnap.DataFiles) > 0 {
