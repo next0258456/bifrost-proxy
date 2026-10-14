@@ -243,6 +243,8 @@ def test_e2e_write_pyiceberg_read_ducklake():
     for o_id, c_name, amt in pruned_rows:
         print(f"           [Pruned > 500] Order #{o_id}: {c_name} | Price: ${amt}")
     assert len(pruned_rows) == 2, f"Expected 2 orders with amount > 500.0, got {len(pruned_rows)}"
+    assert pruned_rows[0][0] == 102 and pruned_rows[0][1] == "Bifrost" and abs(pruned_rows[0][2] - 999.99) < 0.01, f"Unexpected row 1: {pruned_rows[0]}"
+    assert pruned_rows[1][0] == 104 and pruned_rows[1][1] == "Kafka" and abs(pruned_rows[1][2] - 777.0) < 0.01, f"Unexpected row 2: {pruned_rows[1]}"
 
     # 4.3. RBAC & Read-Only Invariant Verification
     print("    [Security] Verifying RBAC and READ_ONLY denial on write/drop operations...")
@@ -268,12 +270,15 @@ def test_e2e_write_pyiceberg_read_ducklake():
     """).fetchall()
     print(f"        -> Verified decoded column bounds in ducklake_file_column_stats: {len(stats_rows)} stats entries found")
     found_order_id_stats = False
+    found_order_id_max = False
     found_customer_name_stats = False
     found_amount_stats = False
     for df_id, col_id, min_val, max_val in stats_rows:
         print(f"           [Stats] File #{df_id} Col #{col_id}: min={min_val}, max={max_val}")
         if col_id == 1 and min_val == '101':
             found_order_id_stats = True
+        if col_id == 1 and max_val >= '103':
+            found_order_id_max = True
         if col_id == 2 and min_val == 'Bifrost' and max_val == 'DuckLake':
             found_customer_name_stats = True
         if col_id == 3 and min_val == '12' and max_val == '999.99':
@@ -281,6 +286,7 @@ def test_e2e_write_pyiceberg_read_ducklake():
 
     assert len(stats_rows) > 0, "Expected decoded min/max bounds in ducklake_file_column_stats"
     assert found_order_id_stats, "Expected order_id min_value '101' in ducklake_file_column_stats"
+    assert found_order_id_max, "Expected order_id max_value >= '103' in ducklake_file_column_stats"
     assert found_customer_name_stats, "Expected customer_name min 'Bifrost' and max 'DuckLake' in ducklake_file_column_stats"
     assert found_amount_stats, "Expected amount min '12' and max '999.99' in ducklake_file_column_stats"
 

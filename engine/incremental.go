@@ -207,6 +207,19 @@ func allocateNextID(tx *sql.Tx, table, idCol string) (int64, error) {
 	return nextID, nil
 }
 
+// FindSchema returns the SchemaEntry matching targetID, or nil if not found.
+func (meta *IcebergMetadata) FindSchema(targetID int) *SchemaEntry {
+	if meta == nil {
+		return nil
+	}
+	for i := range meta.Schemas {
+		if meta.Schemas[i].SchemaID == targetID {
+			return &meta.Schemas[i]
+		}
+	}
+	return nil
+}
+
 // resolveSchemaForSnapshot finds the originating schema corresponding to a specific snapshot.
 func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *SchemaEntry {
 	if meta == nil || len(meta.Schemas) == 0 {
@@ -215,44 +228,36 @@ func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *Schem
 
 	// 1. Explicit schema-id on snapshot
 	if snap != nil && snap.SchemaID != nil {
-		targetID := *snap.SchemaID
-		for i := range meta.Schemas {
-			if meta.Schemas[i].SchemaID == targetID {
-				return &meta.Schemas[i]
-			}
+		if s := meta.FindSchema(*snap.SchemaID); s != nil {
+			return s
 		}
 	}
 
 	// 2. If target snap is the current snapshot, use CurrentSchemaID
 	if snap != nil && snap.SnapshotID != 0 && snap.SnapshotID == meta.CurrentSnapshotID {
-		for i := range meta.Schemas {
-			if meta.Schemas[i].SchemaID == meta.CurrentSchemaID {
-				return &meta.Schemas[i]
-			}
+		if s := meta.FindSchema(meta.CurrentSchemaID); s != nil {
+			return s
 		}
 	}
 
 	// 3. Temporal resolution using snap.TimestampMS:
 	// Search meta.Snapshots for the closest snapshot with a known SchemaID at or before snap.TimestampMS
 	if snap != nil && snap.TimestampMS > 0 && len(meta.Snapshots) > 0 {
-		var closestSchemaID *int
+		closestSchemaID := -1
 		var closestTimestamp int64 = -1
 
 		for _, s := range meta.Snapshots {
 			if s.SchemaID != nil && s.TimestampMS <= snap.TimestampMS {
 				if s.TimestampMS >= closestTimestamp {
 					closestTimestamp = s.TimestampMS
-					id := *s.SchemaID
-					closestSchemaID = &id
+					closestSchemaID = *s.SchemaID
 				}
 			}
 		}
 
-		if closestSchemaID != nil {
-			for i := range meta.Schemas {
-				if meta.Schemas[i].SchemaID == *closestSchemaID {
-					return &meta.Schemas[i]
-				}
+		if closestSchemaID >= 0 {
+			if s := meta.FindSchema(closestSchemaID); s != nil {
+				return s
 			}
 		}
 	}
@@ -264,19 +269,15 @@ func resolveSchemaForSnapshot(meta *IcebergMetadata, snap *SnapshotEntry) *Schem
 
 	// 5. If target snap is historical, resolve to the earliest schema (e.g. SchemaID 0 or first schema)
 	if snap != nil && snap.SnapshotID != 0 && snap.SnapshotID != meta.CurrentSnapshotID {
-		for i := range meta.Schemas {
-			if meta.Schemas[i].SchemaID == 0 {
-				return &meta.Schemas[i]
-			}
+		if s := meta.FindSchema(0); s != nil {
+			return s
 		}
 		return &meta.Schemas[0]
 	}
 
 	// 6. Default fallback to CurrentSchemaID or first schema
-	for i := range meta.Schemas {
-		if meta.Schemas[i].SchemaID == meta.CurrentSchemaID {
-			return &meta.Schemas[i]
-		}
+	if s := meta.FindSchema(meta.CurrentSchemaID); s != nil {
+		return s
 	}
 	return &meta.Schemas[0]
 }

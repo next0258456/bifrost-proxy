@@ -421,8 +421,11 @@ func ReadManifestFileWithColTypes(data []byte, colTypes map[int64]string) (added
 				if err == nil && decoded != "" {
 					return &decoded
 				}
-				if err != nil && colType != "" {
-					log.Printf("Warning: failed to decode binary bound for column %d (%s): %v", colID, colType, err)
+				if colType != "" {
+					if err != nil {
+						log.Printf("Warning: failed to decode binary bound for column %d (%s): %v", colID, colType, err)
+					}
+					return nil
 				}
 				if utf8.Valid(b) {
 					s := string(b)
