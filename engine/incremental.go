@@ -99,21 +99,11 @@ func MapIcebergTypeToDuckLake(icebergType string) string {
 		parts := splitTopLevelComma(inner)
 		var structFields []string
 		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			colonIdx := strings.Index(part, ":")
-			if colonIdx > 0 {
-				fieldName := strings.TrimSpace(part[:colonIdx])
-				fieldType := MapIcebergTypeToDuckLake(strings.TrimSpace(part[colonIdx+1:]))
-				structFields = append(structFields, fmt.Sprintf("%s %s", fieldName, fieldType))
-			} else {
-				spaceIdx := strings.Index(part, " ")
-				if spaceIdx > 0 {
-					fieldName := strings.TrimSpace(part[:spaceIdx])
-					fieldType := MapIcebergTypeToDuckLake(strings.TrimSpace(part[spaceIdx+1:]))
-					structFields = append(structFields, fmt.Sprintf("%s %s", fieldName, fieldType))
-				} else if part != "" {
-					structFields = append(structFields, part)
-				}
+			if name, typ, ok := parseStructField(part); ok {
+				duckType := MapIcebergTypeToDuckLake(typ)
+				structFields = append(structFields, fmt.Sprintf("%s %s", name, duckType))
+			} else if part != "" {
+				structFields = append(structFields, part)
 			}
 		}
 		return fmt.Sprintf("STRUCT(%s)", strings.Join(structFields, ", "))
@@ -150,8 +140,22 @@ func MapIcebergTypeToDuckLake(icebergType string) string {
 	case raw == "json":
 		return "json"
 	default:
-		return raw
+		log.Printf("Warning: unmapped Iceberg type %q, safely falling back to 'varchar'", raw)
+		return "varchar"
 	}
+}
+
+// parseStructField extracts the field name and field type from a struct field definition,
+// supporting either ':' (e.g. "f1: int") or ' ' (e.g. "f1 int") delimiters.
+func parseStructField(part string) (string, string, bool) {
+	part = strings.TrimSpace(part)
+	delimiterIdx := strings.IndexAny(part, ": ")
+	if delimiterIdx > 0 {
+		fieldName := strings.TrimSpace(part[:delimiterIdx])
+		fieldType := strings.TrimSpace(part[delimiterIdx+1:])
+		return fieldName, fieldType, true
+	}
+	return part, "", false
 }
 
 // splitTopLevelComma splits a string on commas that are not nested within <>, (), or []
@@ -265,7 +269,11 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 		}
 	}
 	if meta == nil {
-		meta, _ = ParseMetadataFile(task.MetadataLocation)
+		var localErr error
+		meta, localErr = ParseMetadataFile(task.MetadataLocation)
+		if localErr != nil {
+			log.Printf("Warning: failed to load local metadata file for %s: %v", task.MetadataLocation, localErr)
+		}
 	}
 	if meta == nil {
 		return fmt.Errorf("cannot sync table %s: metadata file could not be loaded from %s", task.Table, task.MetadataLocation)
@@ -680,48 +688,48 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		if _, err := tx.Exec(snapshotSQL, snapshotID, now, schemaVersion, nextCatalogID, nextFileIDCounter); err != nil {
 			return fmt.Errorf("failed to insert snapshot into ducklake: %w", err)
 		}
-	}
 
-	// 7. Ghi nhận sự kiện delta chuẩn hóa tokens vào ducklake_catalog.ducklake_snapshot_changes
-	hasDataFiles := false
-	hasDeleteFiles := false
-	for _, df := range dataFiles {
-		if df.Content == 0 {
-			hasDataFiles = true
-		} else {
-			hasDeleteFiles = true
+		// 7. Ghi nhận sự kiện delta chuẩn hóa tokens vào ducklake_catalog.ducklake_snapshot_changes
+		hasDataFiles := false
+		hasDeleteFiles := false
+		for _, df := range dataFiles {
+			if df.Content == 0 {
+				hasDataFiles = true
+			} else {
+				hasDeleteFiles = true
+			}
 		}
-	}
 
-	var changes []string
-	if newSchemaCreated {
-		changes = append(changes, fmt.Sprintf("created_schema:\"%s\"", schemaName))
-	}
-	if newTableCreated {
-		changes = append(changes, fmt.Sprintf("created_table:\"%s\"", tableUUID))
-	}
-	if hasDataFiles {
-		changes = append(changes, fmt.Sprintf("inserted_into_table:%d", tableID))
-	}
-	if len(deletedPaths) > 0 || hasDeleteFiles {
-		changes = append(changes, fmt.Sprintf("deleted_from_table:%d", tableID))
-	}
-	if columnsAltered && !newTableCreated {
-		changes = append(changes, fmt.Sprintf("altered_table:%d", tableID))
-	}
-	if len(changes) == 0 {
-		changes = append(changes, operation)
-	}
-	changesMade := strings.Join(changes, ",")
+		var changes []string
+		if newSchemaCreated {
+			changes = append(changes, fmt.Sprintf("created_schema:\"%s\"", schemaName))
+		}
+		if newTableCreated {
+			changes = append(changes, fmt.Sprintf("created_table:\"%s\"", tableUUID))
+		}
+		if hasDataFiles {
+			changes = append(changes, fmt.Sprintf("inserted_into_table:%d", tableID))
+		}
+		if len(deletedPaths) > 0 || hasDeleteFiles {
+			changes = append(changes, fmt.Sprintf("deleted_from_table:%d", tableID))
+		}
+		if columnsAltered && !newTableCreated {
+			changes = append(changes, fmt.Sprintf("altered_table:%d", tableID))
+		}
+		if len(changes) == 0 {
+			changes = append(changes, operation)
+		}
+		changesMade := strings.Join(changes, ",")
 
-	commitMsg := fmt.Sprintf("Commit snapshot %d (%s) for table %s", snapshotID, operation, task.Table)
-	changeSQL := `
-		INSERT INTO ducklake_catalog.ducklake_snapshot_changes 
-		(snapshot_id, changes_made, author, commit_message, commit_extra_info)
-		VALUES ($1, $2, 'bifrost-proxy', $3, NULL);
-	`
-	if _, err := tx.Exec(changeSQL, snapshotID, changesMade, commitMsg); err != nil {
-		return fmt.Errorf("failed to insert snapshot change into ducklake: %w", err)
+		commitMsg := fmt.Sprintf("Commit snapshot %d (%s) for table %s", snapshotID, operation, task.Table)
+		changeSQL := `
+			INSERT INTO ducklake_catalog.ducklake_snapshot_changes 
+			(snapshot_id, changes_made, author, commit_message, commit_extra_info)
+			VALUES ($1, $2, 'bifrost-proxy', $3, NULL);
+		`
+		if _, err := tx.Exec(changeSQL, snapshotID, changesMade, commitMsg); err != nil {
+			return fmt.Errorf("failed to insert snapshot change into ducklake: %w", err)
+		}
 	}
 
 	// 7. Commit toàn bộ transaction nguyên khối
@@ -749,7 +757,11 @@ func ParseMetadataFile(filePath string) (*IcebergMetadata, error) {
 	}
 	bytes, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read local metadata file %s: %w", filePath, err)
 	}
-	return ParseMetadataJSON(bytes)
+	meta, err := ParseMetadataJSON(bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse metadata JSON from %s: %w", filePath, err)
+	}
+	return meta, nil
 }

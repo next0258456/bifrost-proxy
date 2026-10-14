@@ -227,6 +227,15 @@ def test_e2e_write_pyiceberg_read_ducklake():
     for order_id, customer_name, amount, tax, created_at in ducklake_rows:
         print(f"    [DuckLake] Order #{order_id}: {customer_name} | Price: ${amount} | Tax: ${tax} | Time: {created_at}")
 
+    # 4.2.1 Range query verification (testing file pruning / filtering)
+    print("        -> Verifying range query with filter `WHERE amount > 100.0`...")
+    filtered_rows = pure_ducklake_reader.execute(
+        f"SELECT order_id, customer_name, amount FROM prod_lake.{namespace}.{table_name} WHERE amount > 100.0 ORDER BY order_id;"
+    ).fetchall()
+    for o_id, c_name, amt in filtered_rows:
+        print(f"           [Filtered] Order #{o_id}: {c_name} | Price: ${amt}")
+    assert len(filtered_rows) == 3, f"Expected 3 orders with amount > 100.0, got {len(filtered_rows)}"
+
     # 4.3. RBAC & Read-Only Invariant Verification
     print("    [Security] Verifying RBAC and READ_ONLY denial on write/drop operations...")
     try:
@@ -241,6 +250,19 @@ def test_e2e_write_pyiceberg_read_ducklake():
     pg_direct = duckdb.connect()
     pg_direct.execute("INSTALL postgres; LOAD postgres;")
     pg_direct.execute("ATTACH 'dbname=polaris host=localhost port=5432 user=ducklake_reader password=reader_password' AS pg_reader (TYPE POSTGRES);")
+
+    # Verify decoded min/max bounds in ducklake_file_column_stats
+    stats_rows = pg_direct.execute("""
+        SELECT data_file_id, column_id, min_value, max_value 
+        FROM pg_reader.ducklake_file_column_stats 
+        WHERE min_value IS NOT NULL AND max_value IS NOT NULL
+        ORDER BY data_file_id, column_id;
+    """).fetchall()
+    print(f"        -> Verified decoded column bounds in ducklake_file_column_stats: {len(stats_rows)} stats entries found")
+    for df_id, col_id, min_val, max_val in stats_rows:
+        print(f"           [Stats] File #{df_id} Col #{col_id}: min={min_val}, max={max_val}")
+    assert len(stats_rows) > 0, "Expected decoded min/max bounds in ducklake_file_column_stats"
+
     try:
         pg_direct.execute("DROP TABLE pg_reader.ducklake_table;")
         assert False, "Security violation: ducklake_reader was unexpectedly allowed to DROP ducklake_table directly in PostgreSQL!"

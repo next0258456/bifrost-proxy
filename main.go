@@ -40,7 +40,7 @@ func main() {
 	}
 	defer syncEngine.Close()
 
-	queue := engine.NewIngestionQueue(syncEngine, 1000)
+	queue := engine.NewIngestionQueue(syncEngine, 50000)
 	defer queue.Stop()
 
 	// 4. Mount Routes

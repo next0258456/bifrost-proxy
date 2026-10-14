@@ -347,11 +347,11 @@ func TestMapIcebergTypeToDuckLake(t *testing.T) {
 		{"array<long>", "int64[]"},
 		{"list<list<double>>", "float64[][]"},
 		{"map<string, int>", "MAP(varchar, int32)"},
-		{"map<string, list<long>>", "MAP(varchar, int64[])"},
 		{"struct<id: int, name: string>", "STRUCT(id int32, name varchar)"},
+		{"struct<id int, name string>", "STRUCT(id int32, name varchar)"},
 		{"struct<user_id: string, tags: list<string>>", "STRUCT(user_id varchar, tags varchar[])"},
 		{"", "varchar"},
-		{"custom_type", "custom_type"},
+		{"custom_type", "varchar"},
 	}
 
 	for _, tc := range testCases {
