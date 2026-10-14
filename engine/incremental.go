@@ -177,6 +177,14 @@ func splitTopLevelComma(s string) []string {
 	return parts
 }
 
+// ptrToAny converts a typed pointer to an untyped interface{} value (or untyped nil if pointer is nil)
+func ptrToAny[T any](p *T) interface{} {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 // allocateNextID generates the next incremental identifier for a catalog table within a transaction
 func (e *SyncEngine) allocateNextID(tx *sql.Tx, table, idCol string) (int64, error) {
 	var nextID int64 = 1
@@ -353,23 +361,30 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		}
 	}
 
-	// 4. Ghi nhận snapshot mới vào ducklake_catalog.ducklake_snapshot
-	now := time.Now().UTC().Format("2006-01-02 15:04:05")
-	var snapExists int
-	if err := tx.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = $1;", snapshotID).Scan(&snapExists); err != nil {
-		return fmt.Errorf("failed to check ducklake_snapshot existence for %d: %w", snapshotID, err)
+	newSchemaCreated := schemaCount == 0
+	newTableCreated := tableCount == 0
+	tableUUID := uuid.New().String()
+	if meta != nil && meta.TableUUID != "" {
+		tableUUID = meta.TableUUID
+	} else if !newTableCreated {
+		_ = tx.QueryRow("SELECT table_uuid FROM ducklake_catalog.ducklake_table WHERE table_id = $1;", tableID).Scan(&tableUUID)
 	}
-	if snapExists == 0 {
-		snapshotSQL := `
-			INSERT INTO ducklake_catalog.ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id)
-			VALUES ($1, $2, 1, 100, 1000);
-		`
-		if _, err := tx.Exec(snapshotSQL, snapshotID, now); err != nil {
-			return fmt.Errorf("failed to insert snapshot into ducklake: %w", err)
+
+	// Resolve active schema early for column stats and evolution
+	var activeSchema *SchemaEntry
+	if meta != nil && len(meta.Schemas) > 0 {
+		for i := range meta.Schemas {
+			if meta.Schemas[i].SchemaID == meta.CurrentSchemaID {
+				activeSchema = &meta.Schemas[i]
+				break
+			}
+		}
+		if activeSchema == nil {
+			activeSchema = &meta.Schemas[len(meta.Schemas)-1]
 		}
 	}
 
-	// 5. Trích xuất file Parquet THẬT từ metadata / Avro manifest list & manifests
+	// 4. Trích xuất file Parquet THẬT từ metadata / Avro manifest list & manifests
 	var dataFiles []ManifestDataFile
 	var deletedPaths []string
 
@@ -424,6 +439,12 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		return err
 	}
 
+	colStatSQL := `
+		INSERT INTO ducklake_catalog.ducklake_file_column_stats 
+		(data_file_id, table_id, column_id, column_size_bytes, value_count, null_count, min_value, max_value, contains_nan, extra_stats)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL);
+	`
+
 	for _, df := range dataFiles {
 		if df.Content == 0 { // 0 = Data file
 			dataFileSQL := `
@@ -434,6 +455,24 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 			if _, err := tx.Exec(dataFileSQL, nextFileID, tableID, snapshotID, df.Path, df.RecordCount, df.FileSizeInBytes); err != nil {
 				return fmt.Errorf("failed to insert data file %s into ducklake: %w", df.Path, err)
 			}
+
+			// Ingest column bounds & stats into ducklake_file_column_stats
+			if len(df.ColumnStats) > 0 {
+				for _, cs := range df.ColumnStats {
+					if _, err := tx.Exec(colStatSQL, nextFileID, tableID, cs.ColumnID, ptrToAny(cs.ColumnSizeBytes), ptrToAny(cs.ValueCount), ptrToAny(cs.NullCount), ptrToAny(cs.MinValue), ptrToAny(cs.MaxValue), ptrToAny(cs.ContainsNaN)); err != nil {
+						return fmt.Errorf("failed to insert file column stats for data file %d (col %d): %w", nextFileID, cs.ColumnID, err)
+					}
+				}
+			} else if activeSchema != nil && len(activeSchema.Fields) > 0 {
+				for _, f := range activeSchema.Fields {
+					var defaultNullCount int64 = 0
+					var defaultContainsNaN bool = false
+					if _, err := tx.Exec(colStatSQL, nextFileID, tableID, f.ID, nil, df.RecordCount, defaultNullCount, nil, nil, defaultContainsNaN); err != nil {
+						return fmt.Errorf("failed to insert default file column stats for data file %d (col %d): %w", nextFileID, f.ID, err)
+					}
+				}
+			}
+
 			nextFileID++
 		} else if df.Content == 1 { // 1 = Delete v2 (Position Deletes)
 			if df.ReferencedPath == "" {
@@ -457,19 +496,9 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		}
 	}
 
-	// 6. Xử lý Schema Evolution động: đối chiếu danh sách cột và cập nhật begin/end_snapshot
-	if meta != nil && len(meta.Schemas) > 0 {
-		var activeSchema *SchemaEntry
-		for i := range meta.Schemas {
-			if meta.Schemas[i].SchemaID == meta.CurrentSchemaID {
-				activeSchema = &meta.Schemas[i]
-				break
-			}
-		}
-		if activeSchema == nil {
-			activeSchema = &meta.Schemas[len(meta.Schemas)-1]
-		}
-
+	// 5. Xử lý Schema Evolution động: đối chiếu danh sách cột và cập nhật begin/end_snapshot
+	columnsAltered := false
+	if activeSchema != nil {
 		// Truy vấn danh sách cột đang active trong DuckLake
 		activeCols := make(map[int]bool)
 		rows, err := tx.Query("SELECT column_id FROM ducklake_catalog.ducklake_column WHERE table_id = $1 AND end_snapshot IS NULL;", tableID)
@@ -492,6 +521,7 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		for orderIdx, f := range activeSchema.Fields {
 			newCols[f.ID] = true
 			if !activeCols[f.ID] {
+				columnsAltered = true
 				duckType := MapIcebergTypeToDuckLake(f.Type)
 
 				columnSQL := `
@@ -508,6 +538,7 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		// Đánh dấu end_snapshot cho các cột đã bị xóa
 		for cid := range activeCols {
 			if !newCols[cid] {
+				columnsAltered = true
 				dropSQL := `
 					UPDATE ducklake_catalog.ducklake_column 
 					SET end_snapshot = $1 
@@ -520,14 +551,102 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		}
 	}
 
-	// 6. Ghi nhận sự kiện delta thật vào ducklake_catalog.ducklake_snapshot_changes (5 cột)
+	// 6. Ghi nhận snapshot mới vào ducklake_catalog.ducklake_snapshot với bộ đếm tăng tiến đơn điệu (Invariants)
+	var prevSchemaVersion, prevNextCatalogID, prevNextFileID int64
+	err = tx.QueryRow(`
+		SELECT COALESCE(MAX(schema_version), 0), COALESCE(MAX(next_catalog_id), 0), COALESCE(MAX(next_file_id), 0)
+		FROM ducklake_catalog.ducklake_snapshot;
+	`).Scan(&prevSchemaVersion, &prevNextCatalogID, &prevNextFileID)
+	if err != nil {
+		return fmt.Errorf("failed to query previous snapshot counters: %w", err)
+	}
+
+	catalogAdditions := int64(0)
+	if newSchemaCreated {
+		catalogAdditions++
+	}
+	if newTableCreated {
+		catalogAdditions++
+	}
+
+	var schemaVersion int64
+	if prevSchemaVersion == 0 {
+		schemaVersion = 1
+	} else {
+		schemaVersion = prevSchemaVersion
+		if newSchemaCreated || newTableCreated || columnsAltered {
+			schemaVersion++
+		}
+	}
+
+	var nextCatalogID int64
+	if prevNextCatalogID == 0 {
+		nextCatalogID = 1 + catalogAdditions
+	} else {
+		nextCatalogID = prevNextCatalogID + catalogAdditions
+	}
+
+	var nextFileIDCounter int64
+	if prevNextFileID == 0 {
+		nextFileIDCounter = 1 + int64(len(dataFiles))
+	} else {
+		nextFileIDCounter = prevNextFileID + int64(len(dataFiles))
+	}
+
+	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	var snapExists int
+	if err := tx.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = $1;", snapshotID).Scan(&snapExists); err != nil {
+		return fmt.Errorf("failed to check ducklake_snapshot existence for %d: %w", snapshotID, err)
+	}
+	if snapExists == 0 {
+		snapshotSQL := `
+			INSERT INTO ducklake_catalog.ducklake_snapshot (snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id)
+			VALUES ($1, $2, $3, $4, $5);
+		`
+		if _, err := tx.Exec(snapshotSQL, snapshotID, now, schemaVersion, nextCatalogID, nextFileIDCounter); err != nil {
+			return fmt.Errorf("failed to insert snapshot into ducklake: %w", err)
+		}
+	}
+
+	// 7. Ghi nhận sự kiện delta chuẩn hóa tokens vào ducklake_catalog.ducklake_snapshot_changes
+	hasDataFiles := false
+	hasDeleteFiles := false
+	for _, df := range dataFiles {
+		if df.Content == 0 {
+			hasDataFiles = true
+		} else {
+			hasDeleteFiles = true
+		}
+	}
+
+	var changes []string
+	if newSchemaCreated {
+		changes = append(changes, fmt.Sprintf("created_schema:\"%s\"", schemaName))
+	}
+	if newTableCreated {
+		changes = append(changes, fmt.Sprintf("created_table:\"%s\"", tableUUID))
+	}
+	if hasDataFiles {
+		changes = append(changes, fmt.Sprintf("inserted_into_table:%d", tableID))
+	}
+	if len(deletedPaths) > 0 || hasDeleteFiles {
+		changes = append(changes, fmt.Sprintf("deleted_from_table:%d", tableID))
+	}
+	if columnsAltered && !newTableCreated {
+		changes = append(changes, fmt.Sprintf("altered_table:%d", tableID))
+	}
+	if len(changes) == 0 {
+		changes = append(changes, operation)
+	}
+	changesMade := strings.Join(changes, ",")
+
 	commitMsg := fmt.Sprintf("Commit snapshot %d (%s) for table %s", snapshotID, operation, task.Table)
 	changeSQL := `
 		INSERT INTO ducklake_catalog.ducklake_snapshot_changes 
 		(snapshot_id, changes_made, author, commit_message, commit_extra_info)
 		VALUES ($1, $2, 'bifrost-proxy', $3, NULL);
 	`
-	if _, err := tx.Exec(changeSQL, snapshotID, operation, commitMsg); err != nil {
+	if _, err := tx.Exec(changeSQL, snapshotID, changesMade, commitMsg); err != nil {
 		return fmt.Errorf("failed to insert snapshot change into ducklake: %w", err)
 	}
 

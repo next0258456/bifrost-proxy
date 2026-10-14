@@ -408,3 +408,129 @@ func TestReadManifestFileWithMapUnionEnvelope(t *testing.T) {
 	assert.Equal(t, "s3://lakehouse/data/map_target.parquet", added[0].ReferencedPath)
 }
 
+func TestExtractColumnBoundsStats(t *testing.T) {
+	manifestSchema := `{
+		"type": "record",
+		"name": "manifest_entry",
+		"fields": [
+			{"name": "status", "type": "int"},
+			{"name": "snapshot_id", "type": ["null", "long"], "default": null},
+			{
+				"name": "data_file",
+				"type": {
+					"type": "record",
+					"name": "r102",
+					"fields": [
+						{"name": "file_path", "type": "string"},
+						{"name": "file_format", "type": "string"},
+						{"name": "record_count", "type": "long"},
+						{"name": "file_size_in_bytes", "type": "long"},
+						{"name": "content", "type": "int", "default": 0},
+						{"name": "column_sizes", "type": ["null", {"type": "map", "values": "long"}], "default": null},
+						{"name": "value_counts", "type": ["null", {"type": "map", "values": "long"}], "default": null},
+						{"name": "null_value_counts", "type": ["null", {"type": "map", "values": "long"}], "default": null},
+						{"name": "nan_value_counts", "type": ["null", {"type": "map", "values": "long"}], "default": null},
+						{"name": "lower_bounds", "type": ["null", {"type": "map", "values": "bytes"}], "default": null},
+						{"name": "upper_bounds", "type": ["null", {"type": "map", "values": "bytes"}], "default": null}
+					]
+				}
+			}
+		]
+	}`
+
+	codec, err := goavro.NewCodec(manifestSchema)
+	require.NoError(t, err)
+
+	buf := new(bytes.Buffer)
+	w, err := goavro.NewOCFWriter(goavro.OCFConfig{
+		W:     buf,
+		Codec: codec,
+	})
+	require.NoError(t, err)
+
+	entries := []map[string]interface{}{
+		{
+			"status":      1,
+			"snapshot_id": map[string]interface{}{"long": int64(4001)},
+			"data_file": map[string]interface{}{
+				"file_path":          "s3://lakehouse/data/stats_test.parquet",
+				"file_format":        "PARQUET",
+				"record_count":       int64(100),
+				"file_size_in_bytes": int64(4096),
+				"content":            0,
+				"column_sizes": map[string]interface{}{
+					"map": map[string]interface{}{
+						"1": int64(1024),
+						"2": int64(2048),
+					},
+				},
+				"value_counts": map[string]interface{}{
+					"map": map[string]interface{}{
+						"1": int64(100),
+						"2": int64(100),
+					},
+				},
+				"null_value_counts": map[string]interface{}{
+					"map": map[string]interface{}{
+						"1": int64(0),
+						"2": int64(5),
+					},
+				},
+				"nan_value_counts": map[string]interface{}{
+					"map": map[string]interface{}{
+						"1": int64(0),
+					},
+				},
+				"lower_bounds": map[string]interface{}{
+					"map": map[string]interface{}{
+						"1": []byte("101"),
+						"2": []byte("Alice"),
+					},
+				},
+				"upper_bounds": map[string]interface{}{
+					"map": map[string]interface{}{
+						"1": []byte("200"),
+						"2": []byte("Zach"),
+					},
+				},
+			},
+		},
+	}
+
+	err = w.Append(entries)
+	require.NoError(t, err)
+
+	added, _, err := ReadManifestFile(buf.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, 1, len(added))
+
+	df := added[0]
+	assert.Equal(t, "s3://lakehouse/data/stats_test.parquet", df.Path)
+	assert.Equal(t, int64(100), df.RecordCount)
+	assert.Equal(t, 2, len(df.ColumnStats))
+
+	// Find stats for col 1 and col 2
+	statsMap := make(map[int64]ManifestColumnStats)
+	for _, cs := range df.ColumnStats {
+		statsMap[cs.ColumnID] = cs
+	}
+
+	col1, ok1 := statsMap[1]
+	require.True(t, ok1)
+	assert.Equal(t, int64(1024), *col1.ColumnSizeBytes)
+	assert.Equal(t, int64(100), *col1.ValueCount)
+	assert.Equal(t, int64(0), *col1.NullCount)
+	assert.Equal(t, "101", *col1.MinValue)
+	assert.Equal(t, "200", *col1.MaxValue)
+	require.NotNil(t, col1.ContainsNaN)
+	assert.False(t, *col1.ContainsNaN)
+
+	col2, ok2 := statsMap[2]
+	require.True(t, ok2)
+	assert.Equal(t, int64(2048), *col2.ColumnSizeBytes)
+	assert.Equal(t, int64(100), *col2.ValueCount)
+	assert.Equal(t, int64(5), *col2.NullCount)
+	assert.Equal(t, "Alice", *col2.MinValue)
+	assert.Equal(t, "Zach", *col2.MaxValue)
+}
+

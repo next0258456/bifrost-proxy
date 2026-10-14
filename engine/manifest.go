@@ -4,11 +4,23 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
+	"unicode/utf8"
 
 	"bifrost-proxy/storage"
 
 	"github.com/linkedin/goavro/v2"
 )
+
+type ManifestColumnStats struct {
+	ColumnID        int64
+	ColumnSizeBytes *int64
+	ValueCount      *int64
+	NullCount       *int64
+	MinValue        *string
+	MaxValue        *string
+	ContainsNaN     *bool
+}
 
 type ManifestDataFile struct {
 	Path            string
@@ -16,6 +28,32 @@ type ManifestDataFile struct {
 	RecordCount     int64
 	Content         int    // 0 = data, 1 = position deletes, 2 = equality deletes
 	ReferencedPath  string // field 2147483546 if delete file
+	ColumnStats     []ManifestColumnStats
+}
+
+// extractMapOrArray parses Avro maps or arrays of key/value pairs into map[int64]interface{}
+func extractMapOrArray(raw interface{}) map[int64]interface{} {
+	result := make(map[int64]interface{})
+	if raw == nil {
+		return result
+	}
+	unwrapped := unwrapAvroUnion(raw)
+	if m, ok := unwrapped.(map[string]interface{}); ok {
+		for k, v := range m {
+			if n, err := strconv.ParseInt(k, 10, 64); err == nil {
+				result[n] = unwrapAvroUnion(v)
+			}
+		}
+	} else if arr, ok := unwrapped.([]interface{}); ok {
+		for _, item := range arr {
+			if entryMap, ok := item.(map[string]interface{}); ok {
+				if k, ok := unwrapInt64(entryMap["key"]); ok {
+					result[k] = unwrapAvroUnion(entryMap["value"])
+				}
+			}
+		}
+	}
+	return result
 }
 
 // unwrapAvroUnion extracts the inner concrete value from a goavro union representation (map[string]interface{})
@@ -200,6 +238,86 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 			if ref, ok := dataFileMap["referenced_data_file"].(string); ok {
 				manifestDataFile.ReferencedPath = ref
 			}
+		}
+
+		// Extract column statistics (bounds, nulls, value counts, sizes)
+		colSizes := extractMapOrArray(dataFileMap["column_sizes"])
+		valCounts := extractMapOrArray(dataFileMap["value_counts"])
+		nullCounts := extractMapOrArray(dataFileMap["null_value_counts"])
+		nanCounts := extractMapOrArray(dataFileMap["nan_value_counts"])
+		lowerBounds := extractMapOrArray(dataFileMap["lower_bounds"])
+		upperBounds := extractMapOrArray(dataFileMap["upper_bounds"])
+
+		allColIDs := make(map[int64]bool)
+		for c := range colSizes {
+			allColIDs[c] = true
+		}
+		for c := range valCounts {
+			allColIDs[c] = true
+		}
+		for c := range nullCounts {
+			allColIDs[c] = true
+		}
+		for c := range nanCounts {
+			allColIDs[c] = true
+		}
+		for c := range lowerBounds {
+			allColIDs[c] = true
+		}
+		for c := range upperBounds {
+			allColIDs[c] = true
+		}
+
+		formatBound := func(v interface{}) *string {
+			if v == nil {
+				return nil
+			}
+			unwrapped := unwrapAvroUnion(v)
+			if b, ok := unwrapped.([]byte); ok {
+				if len(b) > 0 && utf8.Valid(b) {
+					s := string(b)
+					return &s
+				}
+				return nil
+			}
+			if s, ok := unwrapped.(string); ok {
+				if utf8.ValidString(s) {
+					return &s
+				}
+				return nil
+			}
+			s := fmt.Sprintf("%v", unwrapped)
+			if utf8.ValidString(s) {
+				return &s
+			}
+			return nil
+		}
+
+		for colID := range allColIDs {
+			if colID == IcebergReferencedDataFilePathFieldID {
+				continue
+			}
+			var stat ManifestColumnStats
+			stat.ColumnID = colID
+			if sz, ok := unwrapInt64(colSizes[colID]); ok {
+				stat.ColumnSizeBytes = &sz
+			}
+			if vc, ok := unwrapInt64(valCounts[colID]); ok {
+				stat.ValueCount = &vc
+			}
+			if nc, ok := unwrapInt64(nullCounts[colID]); ok {
+				stat.NullCount = &nc
+			}
+			if nanVal, exists := nanCounts[colID]; exists {
+				if nanCount, ok := unwrapInt64(nanVal); ok {
+					hasNan := nanCount > 0
+					stat.ContainsNaN = &hasNan
+				}
+			}
+			stat.MinValue = formatBound(lowerBounds[colID])
+			stat.MaxValue = formatBound(upperBounds[colID])
+
+			manifestDataFile.ColumnStats = append(manifestDataFile.ColumnStats, stat)
 		}
 
 		added = append(added, manifestDataFile)

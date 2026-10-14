@@ -172,6 +172,7 @@ func TestSyncDeltaIncrementalDirectExecution(t *testing.T) {
 		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
 		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
 		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_file_column_stats (data_file_id BIGINT, table_id BIGINT, column_id BIGINT, column_size_bytes BIGINT, value_count BIGINT, null_count BIGINT, min_value VARCHAR, max_value VARCHAR, contains_nan BOOLEAN, extra_stats VARCHAR);
 		INSERT INTO ducklake_catalog.ducklake_schema VALUES (1, '00000000-0000-0000-0000-000000000000', 0, NULL, 'bronze', 'bronze/', true);
 		INSERT INTO ducklake_catalog.ducklake_table VALUES (1, 'uuid-sales', 0, NULL, 1, 'sales', 'sales/', true);
 	`)
@@ -309,7 +310,7 @@ func TestSyncDeltaIncrementalDirectExecution(t *testing.T) {
 	err = db.QueryRow("SELECT author, changes_made, commit_message FROM ducklake_catalog.ducklake_snapshot_changes WHERE snapshot_id = 5002;").Scan(&author, &changesMade, &commitMsg)
 	require.NoError(t, err)
 	assert.Equal(t, "bifrost-proxy", author)
-	assert.Equal(t, "append", changesMade)
+	assert.Equal(t, "altered_table:1", changesMade)
 	assert.Contains(t, commitMsg, "Commit snapshot 5002")
 }
 
@@ -374,6 +375,7 @@ func TestSyncDeltaPositionDeleteFailsOnMissingTargetFile(t *testing.T) {
 		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
 		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
 		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_file_column_stats (data_file_id BIGINT, table_id BIGINT, column_id BIGINT, column_size_bytes BIGINT, value_count BIGINT, null_count BIGINT, min_value VARCHAR, max_value VARCHAR, contains_nan BOOLEAN, extra_stats VARCHAR);
 		INSERT INTO ducklake_catalog.ducklake_schema VALUES (1, '00000000-0000-0000-0000-000000000000', 0, NULL, 'bronze', 'bronze/', true);
 		INSERT INTO ducklake_catalog.ducklake_table VALUES (1, 'uuid-sales', 0, NULL, 1, 'sales', 'sales/', true);
 	`)
@@ -452,6 +454,7 @@ func TestSyncDeltaTransactionalRollbackOnNewTableFailure(t *testing.T) {
 		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
 		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
 		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_file_column_stats (data_file_id BIGINT, table_id BIGINT, column_id BIGINT, column_size_bytes BIGINT, value_count BIGINT, null_count BIGINT, min_value VARCHAR, max_value VARCHAR, contains_nan BOOLEAN, extra_stats VARCHAR);
 	`)
 	require.NoError(t, err)
 
@@ -535,6 +538,7 @@ func TestSyncDeltaAutoCatchUpMissingSnapshots(t *testing.T) {
 		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
 		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
 		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_file_column_stats (data_file_id BIGINT, table_id BIGINT, column_id BIGINT, column_size_bytes BIGINT, value_count BIGINT, null_count BIGINT, min_value VARCHAR, max_value VARCHAR, contains_nan BOOLEAN, extra_stats VARCHAR);
 		INSERT INTO ducklake_catalog.ducklake_schema VALUES (1, '00000000-0000-0000-0000-000000000000', 0, NULL, 'bronze', 'bronze/', true);
 		INSERT INTO ducklake_catalog.ducklake_table VALUES (1, 'uuid-sales', 0, NULL, 1, 'sales', 'sales/', true);
 	`)
@@ -627,6 +631,177 @@ func TestSyncDeltaAutoCatchUpMissingSnapshots(t *testing.T) {
 	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_data_file WHERE path IN ('s3://lakehouse/data/batch1.parquet', 's3://lakehouse/data/batch2.parquet', 's3://lakehouse/data/batch3.parquet');").Scan(&fileCount)
 	require.NoError(t, err)
 	assert.Equal(t, 3, fileCount, "All 3 data files from caught-up snapshots must be present")
+}
+
+func TestDuckLakeSnapshotMonotonicCountersAndChanges(t *testing.T) {
+	db, err := sql.Open("duckdb", "?access_mode=read_write")
+	require.NoError(t, err)
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE SCHEMA IF NOT EXISTS ducklake_catalog;
+		CREATE TABLE ducklake_catalog.ducklake_schema (schema_id BIGINT, schema_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_table (table_id BIGINT, table_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, table_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot (snapshot_id BIGINT, snapshot_time VARCHAR, schema_version INT, next_catalog_id INT, next_file_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_data_file (data_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, partition_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
+		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_file_column_stats (data_file_id BIGINT, table_id BIGINT, column_id BIGINT, column_size_bytes BIGINT, value_count BIGINT, null_count BIGINT, min_value VARCHAR, max_value VARCHAR, contains_nan BOOLEAN, extra_stats VARCHAR);
+	`)
+	require.NoError(t, err)
+
+	metaJSON1 := []byte(`{
+		"format-version": 2,
+		"table-uuid": "uuid-monotonic",
+		"current-snapshot-id": 9001,
+		"current-schema-id": 0,
+		"last-sequence-number": 1,
+		"schemas": [
+			{"schema-id": 0, "fields": [{"id": 1, "name": "id", "type": "long"}, {"id": 2, "name": "val", "type": "string"}]}
+		],
+		"snapshots": [
+			{
+				"snapshot-id": 9001,
+				"timestamp-ms": 1700000000000,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{"path": "s3://lakehouse/data/f1.parquet", "file-size-in-bytes": 100, "record-count": 10, "content": 0},
+					{"path": "s3://lakehouse/data/f2.parquet", "file-size-in-bytes": 200, "record-count": 20, "content": 0}
+				]
+			}
+		]
+	}`)
+
+	mockStore := &mockStorageService{files: make(map[string][]byte)}
+	mockStore.files["s3://lakehouse/bronze/mono/metadata/v1.json"] = metaJSON1
+	syncEng := engine.NewTestSyncEngine(db, mockStore)
+
+	task1 := engine.CommitTask{
+		Table:            domain.TableIdentifier{Namespace: "bronze", Table: "mono"},
+		MetadataLocation: "s3://lakehouse/bronze/mono/metadata/v1.json",
+		SnapshotID:       9001,
+	}
+	err = syncEng.SyncDeltaIncremental(task1)
+	require.NoError(t, err)
+
+	// Verify Snapshot 1 counters and changes
+	var schemaVer1, nextCat1, nextFile1 int64
+	err = db.QueryRow("SELECT schema_version, next_catalog_id, next_file_id FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = 9001;").Scan(&schemaVer1, &nextCat1, &nextFile1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), schemaVer1, "First snapshot schema_version must be 1")
+	assert.Equal(t, int64(3), nextCat1, "next_catalog_id must advance by 2 (schema + table)")
+	assert.Equal(t, int64(3), nextFile1, "next_file_id must advance by 2 files (1 + 2)")
+
+	var changes1 string
+	err = db.QueryRow("SELECT changes_made FROM ducklake_catalog.ducklake_snapshot_changes WHERE snapshot_id = 9001;").Scan(&changes1)
+	require.NoError(t, err)
+	assert.Contains(t, changes1, "created_schema:\"bronze\"")
+	assert.Contains(t, changes1, "created_table:\"uuid-monotonic\"")
+	assert.Contains(t, changes1, "inserted_into_table:1")
+
+	// Verify column stats populated for f1 and f2
+	var colStatCount int
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_file_column_stats WHERE table_id = 1;").Scan(&colStatCount)
+	require.NoError(t, err)
+	assert.Equal(t, 4, colStatCount, "2 files * 2 columns = 4 column stats rows")
+
+	// Snapshot 2: Append 1 data file without schema changes
+	metaJSON2 := []byte(`{
+		"format-version": 2,
+		"table-uuid": "uuid-monotonic",
+		"current-snapshot-id": 9002,
+		"current-schema-id": 0,
+		"last-sequence-number": 2,
+		"schemas": [
+			{"schema-id": 0, "fields": [{"id": 1, "name": "id", "type": "long"}, {"id": 2, "name": "val", "type": "string"}]}
+		],
+		"snapshots": [
+			{
+				"snapshot-id": 9001,
+				"timestamp-ms": 1700000000000,
+				"summary": {"operation": "append"}
+			},
+			{
+				"snapshot-id": 9002,
+				"timestamp-ms": 1700000001000,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{"path": "s3://lakehouse/data/f3.parquet", "file-size-in-bytes": 300, "record-count": 30, "content": 0}
+				]
+			}
+		]
+	}`)
+	mockStore.files["s3://lakehouse/bronze/mono/metadata/v2.json"] = metaJSON2
+
+	task2 := engine.CommitTask{
+		Table:            domain.TableIdentifier{Namespace: "bronze", Table: "mono"},
+		MetadataLocation: "s3://lakehouse/bronze/mono/metadata/v2.json",
+		SnapshotID:       9002,
+	}
+	err = syncEng.SyncDeltaIncremental(task2)
+	require.NoError(t, err)
+
+	// Verify Snapshot 2: schema_version remains 1, file id advances to 4
+	var schemaVer2, nextCat2, nextFile2 int64
+	err = db.QueryRow("SELECT schema_version, next_catalog_id, next_file_id FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = 9002;").Scan(&schemaVer2, &nextCat2, &nextFile2)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), schemaVer2, "Unchanged schema keeps schema_version 1")
+	assert.Equal(t, int64(3), nextCat2, "Unchanged catalog keeps next_catalog_id 3")
+	assert.Equal(t, int64(4), nextFile2, "1 new file advances next_file_id to 4")
+
+	var changes2 string
+	err = db.QueryRow("SELECT changes_made FROM ducklake_catalog.ducklake_snapshot_changes WHERE snapshot_id = 9002;").Scan(&changes2)
+	require.NoError(t, err)
+	assert.Equal(t, "inserted_into_table:1", changes2)
+
+	// Snapshot 3: Schema evolution (add column 3: discount)
+	metaJSON3 := []byte(`{
+		"format-version": 2,
+		"table-uuid": "uuid-monotonic",
+		"current-snapshot-id": 9003,
+		"current-schema-id": 1,
+		"last-sequence-number": 3,
+		"schemas": [
+			{"schema-id": 0, "fields": [{"id": 1, "name": "id", "type": "long"}, {"id": 2, "name": "val", "type": "string"}]},
+			{"schema-id": 1, "fields": [{"id": 1, "name": "id", "type": "long"}, {"id": 2, "name": "val", "type": "string"}, {"id": 3, "name": "discount", "type": "double"}]}
+		],
+		"snapshots": [
+			{"snapshot-id": 9001, "timestamp-ms": 1700000000000, "summary": {"operation": "append"}},
+			{"snapshot-id": 9002, "timestamp-ms": 1700000001000, "summary": {"operation": "append"}},
+			{
+				"snapshot-id": 9003,
+				"timestamp-ms": 1700000002000,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{"path": "s3://lakehouse/data/f4.parquet", "file-size-in-bytes": 400, "record-count": 40, "content": 0}
+				]
+			}
+		]
+	}`)
+	mockStore.files["s3://lakehouse/bronze/mono/metadata/v3.json"] = metaJSON3
+
+	task3 := engine.CommitTask{
+		Table:            domain.TableIdentifier{Namespace: "bronze", Table: "mono"},
+		MetadataLocation: "s3://lakehouse/bronze/mono/metadata/v3.json",
+		SnapshotID:       9003,
+	}
+	err = syncEng.SyncDeltaIncremental(task3)
+	require.NoError(t, err)
+
+	// Verify Snapshot 3: schema evolution advances schema_version to 2!
+	var schemaVer3, nextCat3, nextFile3 int64
+	err = db.QueryRow("SELECT schema_version, next_catalog_id, next_file_id FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = 9003;").Scan(&schemaVer3, &nextCat3, &nextFile3)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), schemaVer3, "Schema evolution monotonically advances schema_version to 2")
+	assert.Equal(t, int64(3), nextCat3)
+	assert.Equal(t, int64(5), nextFile3)
+
+	var changes3 string
+	err = db.QueryRow("SELECT changes_made FROM ducklake_catalog.ducklake_snapshot_changes WHERE snapshot_id = 9003;").Scan(&changes3)
+	require.NoError(t, err)
+	assert.Contains(t, changes3, "inserted_into_table:1")
+	assert.Contains(t, changes3, "altered_table:1")
 }
 
 
