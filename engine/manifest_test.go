@@ -241,3 +241,89 @@ func TestReadManifestFileFilteringAndBounds(t *testing.T) {
 	// Verify status 2 is in deleted
 	assert.Equal(t, []string{"s3://lakehouse/data/deleted1.parquet"}, deleted)
 }
+
+func TestReadManifestFileWithArrayBounds(t *testing.T) {
+	manifestFileSchema := `{
+		"type": "record",
+		"name": "manifest_entry",
+		"fields": [
+			{"name": "status", "type": "int"},
+			{"name": "snapshot_id", "type": ["null", "long"], "default": null},
+			{
+				"name": "data_file",
+				"type": {
+					"type": "record",
+					"name": "r103",
+					"fields": [
+						{"name": "file_path", "type": "string"},
+						{"name": "file_format", "type": "string"},
+						{"name": "record_count", "type": "long"},
+						{"name": "file_size_in_bytes", "type": "long"},
+						{"name": "content", "type": "int", "default": 0},
+						{
+							"name": "lower_bounds",
+							"type": [
+								"null",
+								{
+									"type": "array",
+									"items": {
+										"type": "record",
+										"name": "k_v",
+										"fields": [
+											{"name": "key", "type": "int"},
+											{"name": "value", "type": "bytes"}
+										]
+									}
+								}
+							],
+							"default": null
+						},
+						{
+							"name": "upper_bounds",
+							"type": "null",
+							"default": null
+						}
+					]
+				}
+			}
+		]
+	}`
+
+	var buf bytes.Buffer
+	w, err := goavro.NewOCFWriter(goavro.OCFConfig{
+		W:      &buf,
+		Schema: manifestFileSchema,
+	})
+	require.NoError(t, err)
+
+	entries := []map[string]interface{}{
+		{
+			"status":      1,
+			"snapshot_id": map[string]interface{}{"long": int64(2001)},
+			"data_file": map[string]interface{}{
+				"file_path":          "s3://lakehouse/data/delete_arr.parquet",
+				"file_format":        "PARQUET",
+				"record_count":       int64(2),
+				"file_size_in_bytes": int64(1200),
+				"content":            1,
+				"lower_bounds": map[string]interface{}{
+					"array": []interface{}{
+						map[string]interface{}{
+							"key":   int(IcebergReferencedDataFilePathFieldID),
+							"value": []byte("s3://lakehouse/data/target.parquet"),
+						},
+					},
+				},
+				"upper_bounds": nil,
+			},
+		},
+	}
+
+	err = w.Append(entries)
+	require.NoError(t, err)
+
+	added, _, err := ReadManifestFile(buf.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, 1, len(added))
+	assert.Equal(t, "s3://lakehouse/data/target.parquet", added[0].ReferencedPath)
+}

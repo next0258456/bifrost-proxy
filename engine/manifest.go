@@ -154,9 +154,8 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 			// Map representation: {"2147483546": "s3://..." or {"bytes": [...]}}
 			if m, ok := bVal.(map[string]interface{}); ok {
 				var rawVal interface{}
-				if val, exists := m["2147483546"]; exists {
-					rawVal = val
-				} else if val, exists := m[fmt.Sprintf("%d", IcebergReferencedDataFilePathFieldID)]; exists {
+				fieldKey := fmt.Sprintf("%d", IcebergReferencedDataFilePathFieldID)
+				if val, exists := m[fieldKey]; exists {
 					rawVal = val
 				}
 				if rawVal != nil {
