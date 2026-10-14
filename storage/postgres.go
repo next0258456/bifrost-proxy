@@ -98,6 +98,10 @@ func (s *PostgresCatalogStore) ValidateRequirements(ctx context.Context, id doma
 	}
 	tableExists := err == nil
 
+	return validateTableRequirements(id, reqs, tableExists, currUUID, currSnapID, currSchema)
+}
+
+func validateTableRequirements(id domain.TableIdentifier, reqs []domain.TableRequirement, tableExists bool, currUUID *string, currSnapID *int64, currSchema *int) error {
 	for _, req := range reqs {
 		switch req.Type {
 		case "assert-create":
@@ -229,58 +233,8 @@ func (s *PostgresCatalogStore) CommitTableTransaction(ctx context.Context, id do
 	tableExists := err == nil
 
 	// 2. Validate optimistic concurrency requirements
-	for _, r := range req.Requirements {
-		switch r.Type {
-		case "assert-create":
-			if tableExists {
-				return fmt.Errorf("%w: requirement failed: table %s already exists", ErrCommitConflict, id.String())
-			}
-		case "assert-table-uuid":
-			if !tableExists {
-				return fmt.Errorf("%w: requirement failed: table %s does not exist", ErrCommitConflict, id.String())
-			}
-			actual := ""
-			if currUUID != nil {
-				actual = *currUUID
-			}
-			if r.UUID != "" && actual != r.UUID {
-				return fmt.Errorf("%w: requirement failed: table UUID does not match (expected %s, got %s)", ErrCommitConflict, r.UUID, actual)
-			}
-		case "assert-ref-snapshot-id":
-			if !tableExists {
-				if r.SnapshotID != nil && *r.SnapshotID != -1 {
-					return fmt.Errorf("%w: requirement failed: table %s does not exist for ref %s", ErrCommitConflict, id.String(), r.Ref)
-				}
-			} else {
-				if r.SnapshotID == nil || *r.SnapshotID == -1 {
-					if currSnapID != nil {
-						return fmt.Errorf("%w: requirement failed: branch %s expected null snapshot but was %d", ErrCommitConflict, r.Ref, *currSnapID)
-					}
-				} else {
-					expected := *r.SnapshotID
-					if currSnapID == nil || *currSnapID != expected {
-						actual := int64(0)
-						if currSnapID != nil {
-							actual = *currSnapID
-						}
-						return fmt.Errorf("%w: requirement failed: branch %s was %d but expected %d", ErrCommitConflict, r.Ref, actual, expected)
-					}
-				}
-			}
-		case "assert-current-schema-id":
-			if !tableExists {
-				return fmt.Errorf("%w: requirement failed: table %s does not exist", ErrCommitConflict, id.String())
-			}
-			if r.CurrentSchemaID != nil {
-				if currSchema == nil || *currSchema != *r.CurrentSchemaID {
-					actual := 0
-					if currSchema != nil {
-						actual = *currSchema
-					}
-					return fmt.Errorf("%w: requirement failed: current schema id mismatch (expected %d, got %d)", ErrCommitConflict, *r.CurrentSchemaID, actual)
-				}
-			}
-		}
+	if err := validateTableRequirements(id, req.Requirements, tableExists, currUUID, currSnapID, currSchema); err != nil {
+		return err
 	}
 
 	var snapshotIDPtr *int64

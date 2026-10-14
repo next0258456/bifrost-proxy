@@ -74,6 +74,10 @@ func (m *fakeCatalog) GetTablePointer(ctx context.Context, id domain.TableIdenti
 func (m *fakeCatalog) ValidateRequirements(ctx context.Context, id domain.TableIdentifier, reqs []domain.TableRequirement) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.validateRequirementsLocked(id, reqs)
+}
+
+func (m *fakeCatalog) validateRequirementsLocked(id domain.TableIdentifier, reqs []domain.TableRequirement) error {
 	key := id.String()
 	_, exists := m.pointers[key]
 	for _, req := range reqs {
@@ -157,7 +161,7 @@ func (m *fakeCatalog) CommitTableTransaction(ctx context.Context, id domain.Tabl
 	defer m.mu.Unlock()
 
 	// 1. Validate requirements
-	if err := m.ValidateRequirements(ctx, id, req.Requirements); err != nil {
+	if err := m.validateRequirementsLocked(id, req.Requirements); err != nil {
 		return err
 	}
 

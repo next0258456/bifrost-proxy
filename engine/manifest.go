@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 
 	"bifrost-proxy/storage"
 
@@ -87,6 +86,8 @@ func ReadManifestList(data []byte, targetSnapshotID int64) ([]string, error) {
 	return manifestPaths, nil
 }
 
+const IcebergReferencedDataFilePathFieldID int64 = 2147483546
+
 // ReadManifestFile parses an Iceberg manifest Avro file and returns added files and deleted paths.
 func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, err error) {
 	ocf, err := goavro.NewOCFReader(bytes.NewReader(data))
@@ -121,25 +122,26 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 		if status == 0 {
 			// EXISTING: We do not process existing files in delta commit
 			continue
-		}
-
-		if status == 2 {
+		} else if status == 2 {
 			// DELETED: Record path to close active end_snapshot
 			deleted = append(deleted, filePath)
+			continue
+		} else if status != 1 {
+			// Ignore any unknown status
 			continue
 		}
 
 		// status == 1 (ADDED)
-		var mdf ManifestDataFile
-		mdf.Path = filePath
+		var manifestDataFile ManifestDataFile
+		manifestDataFile.Path = filePath
 		if s, ok := unwrapInt64(dataFileMap["file_size_in_bytes"]); ok {
-			mdf.FileSizeInBytes = s
+			manifestDataFile.FileSizeInBytes = s
 		}
 		if r, ok := unwrapInt64(dataFileMap["record_count"]); ok {
-			mdf.RecordCount = r
+			manifestDataFile.RecordCount = r
 		}
 		if c, ok := unwrapInt64(dataFileMap["content"]); ok {
-			mdf.Content = int(c)
+			manifestDataFile.Content = int(c)
 		}
 
 		// Extract field 2147483546 (referenced data file path in position deletes)
@@ -149,12 +151,22 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 				return ""
 			}
 			bVal := unwrapAvroUnion(bounds)
+			// Map representation: {"2147483546": "s3://..." or {"bytes": [...]}}
 			if m, ok := bVal.(map[string]interface{}); ok {
-				if b, ok := m["2147483546"].([]byte); ok {
-					return string(b)
+				var rawVal interface{}
+				if val, exists := m["2147483546"]; exists {
+					rawVal = val
+				} else if val, exists := m[fmt.Sprintf("%d", IcebergReferencedDataFilePathFieldID)]; exists {
+					rawVal = val
 				}
-				if s, ok := m["2147483546"].(string); ok {
-					return s
+				if rawVal != nil {
+					unwrapped := unwrapAvroUnion(rawVal)
+					if b, ok := unwrapped.([]byte); ok {
+						return string(b)
+					}
+					if s, ok := unwrapped.(string); ok {
+						return s
+					}
 				}
 			}
 			// Array of key/value pairs: [{"key": 2147483546, "value": [...]}]
@@ -162,7 +174,7 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 				for _, item := range arr {
 					if entryMap, ok := item.(map[string]interface{}); ok {
 						k, _ := unwrapInt64(entryMap["key"])
-						if k == 2147483546 {
+						if k == IcebergReferencedDataFilePathFieldID {
 							val := unwrapAvroUnion(entryMap["value"])
 							if b, ok := val.([]byte); ok {
 								return string(b)
@@ -180,18 +192,18 @@ func ReadManifestFile(data []byte) (added []ManifestDataFile, deleted []string, 
 		lowerRef := extractRefPath(dataFileMap["lower_bounds"])
 		upperRef := extractRefPath(dataFileMap["upper_bounds"])
 		if lowerRef != "" {
-			mdf.ReferencedPath = lowerRef
+			manifestDataFile.ReferencedPath = lowerRef
 		} else if upperRef != "" {
-			mdf.ReferencedPath = upperRef
+			manifestDataFile.ReferencedPath = upperRef
 		}
 
-		if mdf.ReferencedPath == "" {
+		if manifestDataFile.ReferencedPath == "" {
 			if ref, ok := dataFileMap["referenced_data_file"].(string); ok {
-				mdf.ReferencedPath = ref
+				manifestDataFile.ReferencedPath = ref
 			}
 		}
 
-		added = append(added, mdf)
+		added = append(added, manifestDataFile)
 	}
 	return added, deleted, nil
 }
@@ -209,23 +221,20 @@ func ExtractDataFilesFromStorage(ctx context.Context, store storage.StorageServi
 
 	manifestPaths, err := ReadManifestList(listBytes, snapshotID)
 	if err != nil {
-		log.Printf("Warning: failed to decode manifest list Avro: %v", err)
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to decode manifest list Avro from %s: %w", manifestListLocation, err)
 	}
 
 	for _, mPath := range manifestPaths {
 		mBytes, err := store.GetMetadataByLocation(ctx, mPath)
 		if err != nil {
-			log.Printf("Warning: failed to read manifest file %s: %v", mPath, err)
-			continue
+			return nil, nil, fmt.Errorf("failed to read manifest file %s: %w", mPath, err)
 		}
-		aFiles, dFiles, err := ReadManifestFile(mBytes)
+		addedFiles, deletedFiles, err := ReadManifestFile(mBytes)
 		if err != nil {
-			log.Printf("Warning: failed to parse manifest file %s: %v", mPath, err)
-			continue
+			return nil, nil, fmt.Errorf("failed to parse manifest file %s: %w", mPath, err)
 		}
-		added = append(added, aFiles...)
-		deleted = append(deleted, dFiles...)
+		added = append(added, addedFiles...)
+		deleted = append(deleted, deletedFiles...)
 	}
 	return added, deleted, nil
 }

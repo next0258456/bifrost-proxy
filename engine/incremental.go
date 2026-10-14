@@ -248,11 +248,10 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	if targetSnap != nil && targetSnap.ManifestList != "" && e.store != nil {
 		mFiles, dFiles, err := ExtractDataFilesFromStorage(context.Background(), e.store, targetSnap.ManifestList, snapshotID)
 		if err != nil {
-			log.Printf("Warning: error reading Avro manifest files: %v", err)
-		} else {
-			dataFiles = append(dataFiles, mFiles...)
-			deletedPaths = append(deletedPaths, dFiles...)
+			return fmt.Errorf("failed to extract manifest files from storage for %s: %w", targetSnap.ManifestList, err)
 		}
+		dataFiles = append(dataFiles, mFiles...)
+		deletedPaths = append(deletedPaths, dFiles...)
 	}
 
 	if len(dataFiles) == 0 && targetSnap != nil && len(targetSnap.DataFiles) > 0 {
@@ -275,7 +274,7 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 			WHERE table_id = $2 AND path = $3 AND end_snapshot IS NULL;
 		`
 		if _, err := e.db.Exec(closeDataFileSQL, snapshotID, tableID, delPath); err != nil {
-			log.Printf("Warning: failed to close end_snapshot for deleted data file %s: %v", delPath, err)
+			return fmt.Errorf("failed to close end_snapshot for deleted data file %s: %w", delPath, err)
 		}
 		closeDeleteFileSQL := `
 			UPDATE ducklake_catalog.ducklake_delete_file 
@@ -283,7 +282,7 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 			WHERE table_id = $2 AND path = $3 AND end_snapshot IS NULL;
 		`
 		if _, err := e.db.Exec(closeDeleteFileSQL, snapshotID, tableID, delPath); err != nil {
-			log.Printf("Warning: failed to close end_snapshot for deleted delete file %s: %v", delPath, err)
+			return fmt.Errorf("failed to close end_snapshot for deleted delete file %s: %w", delPath, err)
 		}
 	}
 
@@ -313,9 +312,9 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 				return fmt.Errorf("position delete file %s has no referenced data file path", df.Path)
 			}
 			var refDataFileID int64
-			err := e.db.QueryRow("SELECT data_file_id FROM ducklake_catalog.ducklake_data_file WHERE path = $1 LIMIT 1;", df.ReferencedPath).Scan(&refDataFileID)
+			err := e.db.QueryRow("SELECT data_file_id FROM ducklake_catalog.ducklake_data_file WHERE path = $1 AND table_id = $2 AND end_snapshot IS NULL LIMIT 1;", df.ReferencedPath, tableID).Scan(&refDataFileID)
 			if err != nil {
-				return fmt.Errorf("failed to resolve referenced data file ID for position delete %s (path: %s): %w", df.Path, df.ReferencedPath, err)
+				return fmt.Errorf("failed to resolve active referenced data file ID for position delete %s in table %d (path: %s): %w", df.Path, tableID, df.ReferencedPath, err)
 			}
 
 			deleteFileSQL := `
