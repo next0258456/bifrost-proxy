@@ -58,7 +58,17 @@ docker compose up -d
 python test_e2e_pyiceberg_ducklake.py
 ```
 
-### 3. Chạy Load Test với k6
+### 3. Kết nối Truy vấn Pure DuckLake (Zero Direct Access RBAC)
+Các công cụ phân tích (DuckDB, Superset, BI) kết nối vào PostgreSQL qua role chỉ đọc `ducklake_reader`:
+```sql
+ATTACH 'ducklake:postgres:dbname=polaris host=localhost port=5432 user=ducklake_reader password=reader_password' 
+AS prod_lake (DATA_PATH 's3://lakehouse/bronze/', OVERRIDE_DATA_PATH true, READ_ONLY true);
+
+-- Truy vấn trực tiếp với tốc độ Native DuckLake, không qua iceberg_scan:
+SELECT * FROM prod_lake.bronze.orders;
+```
+
+### 4. Chạy Load Test với k6
 ```bash
 docker run --rm --network data_platform_default -v "$(pwd):/app" grafana/k6:latest run /app/benchmark.js
 ```

@@ -52,12 +52,15 @@ flowchart TD
      - Cập nhật con trỏ con trỏ vị trí metadata hiện tại vào bảng `catalog_tables` của Iceberg (phục vụ các reader đọc theo chuẩn Iceberg).
      - Đẩy tác vụ đồng bộ vào hàng đợi nội bộ (`IngestionQueue`) không gây nghẽn HTTP request.
      - Worker nội bộ trích xuất các file Parquet dữ liệu thật (`Data Files`) và file xóa (`Position Delete Files`) từ Iceberg Manifest, đồng bộ tức thì vào các bảng `ducklake_schema`, `ducklake_table`, `ducklake_snapshot`, `ducklake_data_file`, `ducklake_delete_file` trong PostgreSQL.
-2. **Luồng Truy Vấn Siêu Tốc (Pure Native DuckLake Query):**
-   - **DuckDB / Superset:** Kết nối trực tiếp vào PostgreSQL thông qua cú pháp:
+2. **Luồng Truy Vấn Siêu Tốc & Bảo Mật Đa Tầng (Zero Direct Access RBAC):**
+   - **DuckDB / Superset / BI Readers:** Kết nối trực tiếp vào PostgreSQL thông qua tài khoản phân quyền đọc duy nhất (`ducklake_reader`):
      ```sql
-     ATTACH 'ducklake:postgres:dbname=polaris host=localhost port=5432 user=admin password=password' 
-     AS prod_lake (DATA_PATH 's3://lakehouse/<namespace>/', OVERRIDE_DATA_PATH true);
+     ATTACH 'ducklake:postgres:dbname=polaris host=localhost port=5432 user=ducklake_reader password=reader_password' 
+     AS prod_lake (DATA_PATH 's3://lakehouse/<namespace>/', OVERRIDE_DATA_PATH true, READ_ONLY true);
      ```
+   - **Bảo Vệ Đa Tầng (Defense-in-Depth):**
+     1. **DuckLake Engine Layer (`READ_ONLY true`):** DuckDB từ chối ngay lập tức mọi câu lệnh ghi/xóa/sửa cấu trúc (`DROP`, `INSERT`, `ALTER`, `CREATE`) ở cấp độ engine query.
+     2. **PostgreSQL RBAC Layer (`ducklake_reader`):** Role chỉ có quyền `USAGE` và `SELECT` trên các bảng catalog DuckLake (`ducklake_schema`, `ducklake_table`, `ducklake_snapshot`, `ducklake_data_file`, v.v.). Bất kỳ nỗ lực ghi, xóa hoặc drop trực tiếp trên database đều bị PostgreSQL chặn đứng (`ERROR: permission denied` / `ERROR: must be owner`).
    - Truy vấn trực tiếp các bảng nghiệp vụ (`SELECT * FROM prod_lake.bronze.orders;`) với tốc độ native, **hoàn toàn không cần phân tích cây Iceberg manifest hay gọi `iceberg_scan()`**.
 
 ---

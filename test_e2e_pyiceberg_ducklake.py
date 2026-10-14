@@ -202,10 +202,10 @@ def test_e2e_write_pyiceberg_read_ducklake():
         );
     """)
 
-    # Attach DuckLake from Postgres backend!
+    # Attach DuckLake from Postgres backend using Zero Direct Access RBAC role ducklake_reader!
     pure_ducklake_reader.execute(f"""
-        ATTACH 'ducklake:postgres:dbname=polaris host=localhost port=5432 user=admin password=password' 
-        AS prod_lake (DATA_PATH 's3://lakehouse/{namespace}/', OVERRIDE_DATA_PATH true);
+        ATTACH 'ducklake:postgres:dbname=polaris host=localhost port=5432 user=ducklake_reader password=reader_password' 
+        AS prod_lake (DATA_PATH 's3://lakehouse/{namespace}/', OVERRIDE_DATA_PATH true, READ_ONLY true);
     """)
 
     # Deterministic polling: poll until table is visible and populated by async worker
@@ -226,13 +226,38 @@ def test_e2e_write_pyiceberg_read_ducklake():
 
     for order_id, customer_name, amount, tax, created_at in ducklake_rows:
         print(f"    [DuckLake] Order #{order_id}: {customer_name} | Price: ${amount} | Tax: ${tax} | Time: {created_at}")
+
+    # 4.3. RBAC & Read-Only Invariant Verification
+    print("    [Security] Verifying RBAC and READ_ONLY denial on write/drop operations...")
+    try:
+        pure_ducklake_reader.execute(f"DROP TABLE prod_lake.{namespace}.{table_name};")
+        assert False, "Security violation: ducklake_reader was unexpectedly allowed to DROP table!"
+    except Exception as e:
+        print(f"        -> Verified write/drop denial on DuckLake READ_ONLY: {e}")
+
     pure_ducklake_reader.close()
+
+    # Also verify direct PostgreSQL RBAC denial when connecting via ducklake_reader
+    pg_direct = duckdb.connect()
+    pg_direct.execute("INSTALL postgres; LOAD postgres;")
+    pg_direct.execute("ATTACH 'dbname=polaris host=localhost port=5432 user=ducklake_reader password=reader_password' AS pg_reader (TYPE POSTGRES);")
+    try:
+        pg_direct.execute("DROP TABLE pg_reader.ducklake_table;")
+        assert False, "Security violation: ducklake_reader was unexpectedly allowed to DROP ducklake_table directly in PostgreSQL!"
+    except Exception as e:
+        print(f"        -> Verified direct PostgreSQL RBAC DROP denial: {e}")
+    try:
+        pg_direct.execute("INSERT INTO pg_reader.ducklake_table(table_id, table_uuid, begin_snapshot, schema_id, table_name, path) VALUES (999999, '00000000-0000-0000-0000-000000000000', 1, 1, 'forbidden', 'forbidden/');")
+        assert False, "Security violation: ducklake_reader was unexpectedly allowed to INSERT into ducklake_table directly in PostgreSQL!"
+    except Exception as e:
+        print(f"        -> Verified direct PostgreSQL RBAC INSERT denial: {e}")
+    pg_direct.close()
 
     assert len(ducklake_rows) == 5, f"Unexpected DuckLake row count: {len(ducklake_rows)} (expected 5 across 2 appends)"
     assert ducklake_rows == iceberg_rows, "Data between Iceberg and Pure DuckLake does not match!"
 
     print("\n======================================================================")
-    print("SUCCESS: PURE DUCKLAKE QUERY VERIFIED (NO ICEBERG SCAN NEEDED)!")
+    print("SUCCESS: PURE DUCKLAKE QUERY & RBAC HARDENING VERIFIED!")
     print("======================================================================\n")
 
 

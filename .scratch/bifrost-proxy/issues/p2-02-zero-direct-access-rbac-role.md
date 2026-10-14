@@ -4,11 +4,11 @@
 
 **Blocked by:** p1-01: Transactional Delta Sync and Fail-Fast Startup, p2-01: DuckLake Catalog Invariants and Column Bounds Statistics
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Create database migration / initialization script for role `ducklake_reader` with `LOGIN PASSWORD 'reader_password'`.
-- [ ] Grant `USAGE` on schema `ducklake_catalog`, `SELECT` on all tables in `ducklake_catalog`, and `SELECT` on `catalog_tables`.
-- [ ] Configure `ALTER DEFAULT PRIVILEGES IN SCHEMA ducklake_catalog GRANT SELECT ON TABLES TO ducklake_reader;` for future catalog tables.
-- [ ] Update `test_e2e_pyiceberg_ducklake.py` to connect via `user=ducklake_reader password=reader_password` with `READ_ONLY true`.
-- [ ] Update documentation (`README.md`, `docs/ARCHITECTURE.md`) reflecting connection strings and security architecture.
-- [ ] Verify that `ducklake_reader` can read catalog data successfully and is denied permission on write/drop commands.
+- [x] Create database migration / initialization script for role `ducklake_reader` with `LOGIN PASSWORD 'reader_password'`.
+- [x] Grant `USAGE` on schema `ducklake_catalog`, `SELECT` on all tables in `ducklake_catalog`, and `SELECT` on `catalog_tables`.
+- [x] Configure `ALTER DEFAULT PRIVILEGES IN SCHEMA ducklake_catalog GRANT SELECT ON TABLES TO ducklake_reader;` for future catalog tables.
+- [x] Update `test_e2e_pyiceberg_ducklake.py` to connect via `user=ducklake_reader password=reader_password` with `READ_ONLY true`.
+- [x] Update documentation (`README.md`, `docs/ARCHITECTURE.md`) reflecting connection strings and security architecture.
+- [x] Verify that `ducklake_reader` can read catalog data successfully and is denied permission on write/drop commands.
