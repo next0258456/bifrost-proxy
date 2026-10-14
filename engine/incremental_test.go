@@ -520,6 +520,116 @@ func TestSyncDeltaTransactionalRollbackOnNewTableFailure(t *testing.T) {
 	assert.Equal(t, 0, snapCount, "Snapshot 7001 should be rolled back")
 }
 
+func TestSyncDeltaAutoCatchUpMissingSnapshots(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	require.NoError(t, err)
+	defer db.Close()
+
+	// Initialize mock DuckLake catalog schema and tables
+	_, err = db.Exec(`
+		CREATE SCHEMA IF NOT EXISTS ducklake_catalog;
+		CREATE TABLE ducklake_catalog.ducklake_schema (schema_id BIGINT, schema_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_table (table_id BIGINT, table_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, table_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot (snapshot_id BIGINT, snapshot_time VARCHAR, schema_version INT, next_catalog_id INT, next_file_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_data_file (data_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, partition_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
+		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+		INSERT INTO ducklake_catalog.ducklake_schema VALUES (1, '00000000-0000-0000-0000-000000000000', 0, NULL, 'bronze', 'bronze/', true);
+		INSERT INTO ducklake_catalog.ducklake_table VALUES (1, 'uuid-sales', 0, NULL, 1, 'sales', 'sales/', true);
+	`)
+	require.NoError(t, err)
+
+	// Iceberg metadata has 3 consecutive snapshots: 8001, 8002, 8003
+	multiSnapMetaJSON := []byte(`{
+		"format-version": 2,
+		"table-uuid": "uuid-sales",
+		"current-snapshot-id": 8003,
+		"current-schema-id": 0,
+		"last-sequence-number": 3,
+		"schemas": [
+			{
+				"schema-id": 0,
+				"fields": [
+					{"id": 1, "name": "order_id", "required": true, "type": "bigint"}
+				]
+			}
+		],
+		"snapshots": [
+			{
+				"snapshot-id": 8001,
+				"timestamp-ms": 1700000000000,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{
+						"file_path": "s3://lakehouse/data/batch1.parquet",
+						"file_size_in_bytes": 1000,
+						"record_count": 10,
+						"content": 0
+					}
+				]
+			},
+			{
+				"snapshot-id": 8002,
+				"timestamp-ms": 1700000001000,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{
+						"file_path": "s3://lakehouse/data/batch2.parquet",
+						"file_size_in_bytes": 2000,
+						"record_count": 20,
+						"content": 0
+					}
+				]
+			},
+			{
+				"snapshot-id": 8003,
+				"timestamp-ms": 1700000002000,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{
+						"file_path": "s3://lakehouse/data/batch3.parquet",
+						"file_size_in_bytes": 3000,
+						"record_count": 30,
+						"content": 0
+					}
+				]
+			}
+		]
+	}`)
+
+	mockStore := &mockStorageService{
+		files: map[string][]byte{
+			"s3://lakehouse/metadata/v8.json": multiSnapMetaJSON,
+		},
+	}
+
+	syncEng := engine.NewTestSyncEngine(db, mockStore)
+
+	// Direct commit for snapshot 8003 (8001 and 8002 were missed)
+	task := engine.CommitTask{
+		Table:            domain.NewTableIdentifier("bronze", "sales"),
+		MetadataLocation: "s3://lakehouse/metadata/v8.json",
+		SnapshotID:       8003,
+	}
+
+	err = syncEng.SyncDeltaIncremental(task)
+	require.NoError(t, err)
+
+	// Auto Catch-up should have caught up snapshots 8001 and 8002, and applied 8003
+	var snapCount int
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id IN (8001, 8002, 8003);").Scan(&snapCount)
+	require.NoError(t, err)
+	assert.Equal(t, 3, snapCount, "All 3 snapshots (8001, 8002, 8003) must be present via catch-up")
+
+	// All 3 data files must be present
+	var fileCount int
+	err = db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_data_file WHERE path IN ('s3://lakehouse/data/batch1.parquet', 's3://lakehouse/data/batch2.parquet', 's3://lakehouse/data/batch3.parquet');").Scan(&fileCount)
+	require.NoError(t, err)
+	assert.Equal(t, 3, fileCount, "All 3 data files from caught-up snapshots must be present")
+}
+
+
 
 
 

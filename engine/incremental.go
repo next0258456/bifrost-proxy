@@ -214,26 +214,62 @@ func (e *SyncEngine) SyncDeltaIncremental(task CommitTask) error {
 	// 2. Trích xuất đúng Snapshot và Summary delta thật
 	snapshotID := task.SnapshotID
 	var targetSnap *SnapshotEntry
+	targetIdx := -1
 
 	if meta != nil {
 		for i := range meta.Snapshots {
 			s := &meta.Snapshots[i]
 			if snapshotID != 0 && s.SnapshotID == snapshotID {
 				targetSnap = s
+				targetIdx = i
 				break
 			}
 			if snapshotID == 0 && s.SnapshotID == meta.CurrentSnapshotID {
 				targetSnap = s
 				snapshotID = s.SnapshotID
+				targetIdx = i
 				break
 			}
 		}
 		if targetSnap == nil && len(meta.Snapshots) > 0 {
-			targetSnap = &meta.Snapshots[len(meta.Snapshots)-1]
+			targetIdx = len(meta.Snapshots) - 1
+			targetSnap = &meta.Snapshots[targetIdx]
 			if snapshotID == 0 {
 				snapshotID = targetSnap.SnapshotID
 			}
 		}
+	}
+	if snapshotID == 0 {
+		snapshotID = time.Now().UnixMilli()
+	}
+
+	// Auto Catch-up Re-sync: Đồng bộ bù tất cả snapshot trong lịch sử trước targetSnap nếu chưa tồn tại trong DuckLake
+	if meta != nil && targetIdx > 0 {
+		for i := 0; i < targetIdx; i++ {
+			prevSnap := &meta.Snapshots[i]
+			var snapExists int
+			err := e.db.QueryRow("SELECT count(*) FROM ducklake_catalog.ducklake_snapshot WHERE snapshot_id = $1;", prevSnap.SnapshotID).Scan(&snapExists)
+			if err == nil && snapExists == 0 {
+				log.Printf("IngestionQueue: Catching up missing snapshot %d for %s", prevSnap.SnapshotID, task.Table)
+				catchUpTask := CommitTask{
+					Table:            task.Table,
+					MetadataLocation: task.MetadataLocation,
+					SnapshotID:       prevSnap.SnapshotID,
+				}
+				if err := e.syncSnapshotInternal(catchUpTask, meta, prevSnap); err != nil {
+					return fmt.Errorf("failed during catch-up sync for snapshot %d: %w", prevSnap.SnapshotID, err)
+				}
+			}
+		}
+	}
+
+	return e.syncSnapshotInternal(task, meta, targetSnap)
+}
+
+func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata, targetSnap *SnapshotEntry) error {
+	snapshotID := task.SnapshotID
+	if targetSnap != nil && targetSnap.SnapshotID != 0 {
+		snapshotID = targetSnap.SnapshotID
 	}
 	if snapshotID == 0 {
 		snapshotID = time.Now().UnixMilli()

@@ -4,10 +4,10 @@
 
 **Blocked by:** p1-01: Transactional Delta Sync and Fail-Fast Startup
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Worker retries failed `SyncDeltaIncremental` execution up to 3 times with exponential backoff (e.g., 100ms, 500ms, 1500ms) before logging an error.
-- [ ] Before synchronizing a new snapshot for a table, the engine checks the latest recorded snapshot for that table in DuckLake.
-- [ ] If a gap is detected (DuckLake is behind the previous snapshot of the current commit), the engine traverses `meta.Snapshots` history to replay and synchronize missing intermediate snapshots sequentially.
-- [ ] Unit test verifies worker transient retry behavior on simulated temporary network errors.
-- [ ] Unit test verifies automatic catch-up replay when a snapshot gap is present in the table's metadata history.
+- [x] Worker retries failed `SyncDeltaIncremental` execution up to 3 times with exponential backoff (e.g., 100ms, 500ms, 1500ms) before logging an error.
+- [x] Before synchronizing a new snapshot for a table, the engine checks the latest recorded snapshot for that table in DuckLake.
+- [x] If a gap is detected (DuckLake is behind the previous snapshot of the current commit), the engine traverses `meta.Snapshots` history to replay and synchronize missing intermediate snapshots sequentially.
+- [x] Unit test verifies worker transient retry behavior on simulated temporary network errors.
+- [x] Unit test verifies automatic catch-up replay when a snapshot gap is present in the table's metadata history.

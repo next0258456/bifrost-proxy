@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"database/sql"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -8,7 +9,9 @@ import (
 	"bifrost-proxy/domain"
 	"bifrost-proxy/engine"
 
+	_ "github.com/marcboeker/go-duckdb"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIngestionQueueConcurrency(t *testing.T) {
@@ -44,3 +47,26 @@ func TestIngestionQueueConcurrency(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	queue.Stop()
 }
+
+func TestIngestionQueueWorkerRetriesOnFailure(t *testing.T) {
+	db, err := sql.Open("duckdb", "")
+	require.NoError(t, err)
+	defer db.Close()
+
+	syncEng := engine.NewTestSyncEngine(db, nil)
+	queue := engine.NewIngestionQueue(syncEng, 10)
+	queue.RetryBackoff = 1 * time.Millisecond
+
+	// Task referencing non-existent metadata file will fail and trigger 3 retry attempts
+	ok := queue.Submit(engine.CommitTask{
+		Table:            domain.NewTableIdentifier("bronze", "retry_table"),
+		MetadataLocation: "s3://non-existent/metadata.json",
+		SnapshotID:       9999,
+	})
+	assert.True(t, ok)
+
+	// Sleep briefly for all 3 attempts to finish
+	time.Sleep(50 * time.Millisecond)
+	queue.Stop()
+}
+

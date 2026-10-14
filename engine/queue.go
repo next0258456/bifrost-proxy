@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sync"
+	"time"
 
 	"bifrost-proxy/domain"
 )
@@ -23,20 +24,22 @@ type QueueService interface {
 
 // IngestionQueue manages a bounded buffer channel and sequential worker pool
 type IngestionQueue struct {
-	taskChan chan CommitTask
-	engine   *SyncEngine
-	wg       sync.WaitGroup
-	ctx      context.Context
-	cancel   context.CancelFunc
+	taskChan     chan CommitTask
+	engine       *SyncEngine
+	wg           sync.WaitGroup
+	ctx          context.Context
+	cancel       context.CancelFunc
+	RetryBackoff time.Duration
 }
 
 func NewIngestionQueue(engine *SyncEngine, bufferSize int) *IngestionQueue {
 	ctx, cancel := context.WithCancel(context.Background())
 	q := &IngestionQueue{
-		taskChan: make(chan CommitTask, bufferSize),
-		engine:   engine,
-		ctx:      ctx,
-		cancel:   cancel,
+		taskChan:     make(chan CommitTask, bufferSize),
+		engine:       engine,
+		ctx:          ctx,
+		cancel:       cancel,
+		RetryBackoff: 100 * time.Millisecond,
 	}
 
 	// 1 sequential worker eliminates write contention and enforces RAM limits
@@ -70,8 +73,28 @@ func (q *IngestionQueue) worker() {
 			}
 			log.Printf("IngestionQueue: Processing commit for %s (Metadata: %s)", task.Table, task.MetadataLocation)
 			if q.engine != nil {
-				if err := q.engine.SyncDeltaIncremental(task); err != nil {
-					log.Printf("IngestionQueue: Sync error for %s: %v", task.Table, err)
+				var syncErr error
+				backoff := q.RetryBackoff
+				if backoff == 0 {
+					backoff = 100 * time.Millisecond
+				}
+				for attempt := 1; attempt <= 3; attempt++ {
+					syncErr = q.engine.SyncDeltaIncremental(task)
+					if syncErr == nil {
+						break
+					}
+					log.Printf("IngestionQueue: Attempt %d failed for %s: %v", attempt, task.Table, syncErr)
+					if attempt < 3 {
+						select {
+						case <-time.After(backoff):
+							backoff *= 3
+						case <-q.ctx.Done():
+							return
+						}
+					}
+				}
+				if syncErr != nil {
+					log.Printf("IngestionQueue: Final sync error after 3 attempts for %s: %v", task.Table, syncErr)
 				}
 			}
 		}
