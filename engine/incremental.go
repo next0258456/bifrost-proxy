@@ -185,8 +185,15 @@ func ptrToAny[T any](p *T) interface{} {
 	return *p
 }
 
-// allocateNextID generates the next incremental identifier for a catalog table within a transaction
-func (e *SyncEngine) allocateNextID(tx *sql.Tx, table, idCol string) (int64, error) {
+// SnapshotCounters tracks monotonic catalog, file, and schema version counters in ducklake_snapshot.
+type SnapshotCounters struct {
+	SchemaVersion int64
+	NextCatalogID int64
+	NextFileID    int64
+}
+
+// allocateNextID generates the next incremental identifier for a catalog table within a transaction.
+func allocateNextID(tx *sql.Tx, table, idCol string) (int64, error) {
 	var nextID int64 = 1
 	query := fmt.Sprintf("SELECT COALESCE(MAX(%s), 0) + 1 FROM ducklake_catalog.%s;", idCol, table)
 	if err := tx.QueryRow(query).Scan(&nextID); err != nil {
@@ -311,7 +318,7 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		return fmt.Errorf("failed to query ducklake_schema for namespace %s: %w", schemaName, err)
 	}
 	if schemaCount == 0 {
-		nextSchemaID, err := e.allocateNextID(tx, "ducklake_schema", "schema_id")
+		nextSchemaID, err := allocateNextID(tx, "ducklake_schema", "schema_id")
 		if err != nil {
 			return err
 		}
@@ -339,7 +346,7 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 	// Bảng chưa tồn tại trong DuckLake: bootstrap đăng ký table_id mới
 	if tableCount == 0 {
 		log.Printf("Table %s chưa có trong DuckLake, đăng ký table metadata vào DuckLake...", task.Table)
-		nextTblID, err := e.allocateNextID(tx, "ducklake_table", "table_id")
+		nextTblID, err := allocateNextID(tx, "ducklake_table", "table_id")
 		if err != nil {
 			return err
 		}
@@ -440,12 +447,12 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 		}
 	}
 
-	nextFileID, err := e.allocateNextID(tx, "ducklake_data_file", "data_file_id")
+	nextFileID, err := allocateNextID(tx, "ducklake_data_file", "data_file_id")
 	if err != nil {
 		return err
 	}
 
-	nextDeleteFileID, err := e.allocateNextID(tx, "ducklake_delete_file", "delete_file_id")
+	nextDeleteFileID, err := allocateNextID(tx, "ducklake_delete_file", "delete_file_id")
 	if err != nil {
 		return err
 	}
@@ -563,11 +570,11 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 	}
 
 	// 6. Ghi nhận snapshot mới vào ducklake_catalog.ducklake_snapshot với bộ đếm tăng tiến đơn điệu (Invariants)
-	var prevSchemaVersion, prevNextCatalogID, prevNextFileID int64
+	var prevCounters SnapshotCounters
 	err = tx.QueryRow(`
 		SELECT COALESCE(MAX(schema_version), 0), COALESCE(MAX(next_catalog_id), 0), COALESCE(MAX(next_file_id), 0)
 		FROM ducklake_catalog.ducklake_snapshot;
-	`).Scan(&prevSchemaVersion, &prevNextCatalogID, &prevNextFileID)
+	`).Scan(&prevCounters.SchemaVersion, &prevCounters.NextCatalogID, &prevCounters.NextFileID)
 	if err != nil {
 		return fmt.Errorf("failed to query previous snapshot counters: %w", err)
 	}
@@ -581,27 +588,49 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 	}
 
 	var schemaVersion int64
-	if prevSchemaVersion == 0 {
+	if prevCounters.SchemaVersion == 0 {
 		schemaVersion = 1
 	} else {
-		schemaVersion = prevSchemaVersion
+		schemaVersion = prevCounters.SchemaVersion
 		if newSchemaCreated || newTableCreated || columnsAltered {
 			schemaVersion++
 		}
 	}
 
 	var nextCatalogID int64
-	if prevNextCatalogID == 0 {
+	if prevCounters.NextCatalogID == 0 {
 		nextCatalogID = 1 + catalogAdditions
 	} else {
-		nextCatalogID = prevNextCatalogID + catalogAdditions
+		nextCatalogID = prevCounters.NextCatalogID + catalogAdditions
 	}
 
 	var nextFileIDCounter int64
-	if prevNextFileID == 0 {
+	if prevCounters.NextFileID == 0 {
 		nextFileIDCounter = 1 + int64(len(dataFiles))
 	} else {
-		nextFileIDCounter = prevNextFileID + int64(len(dataFiles))
+		nextFileIDCounter = prevCounters.NextFileID + int64(len(dataFiles))
+	}
+
+	// Đảm bảo invariant đơn điệu chặt chẽ: next_catalog_id > max(catalog_entities), next_file_id > max(file_entities)
+	var maxCatalogID, maxFileID int64
+	err = tx.QueryRow(`
+		SELECT GREATEST(
+			COALESCE((SELECT MAX(schema_id) FROM ducklake_catalog.ducklake_schema), 0),
+			COALESCE((SELECT MAX(table_id) FROM ducklake_catalog.ducklake_table), 0)
+		);
+	`).Scan(&maxCatalogID)
+	if err == nil && nextCatalogID <= maxCatalogID {
+		nextCatalogID = maxCatalogID + 1
+	}
+
+	err = tx.QueryRow(`
+		SELECT GREATEST(
+			COALESCE((SELECT MAX(data_file_id) FROM ducklake_catalog.ducklake_data_file), 0),
+			COALESCE((SELECT MAX(delete_file_id) FROM ducklake_catalog.ducklake_delete_file), 0)
+		);
+	`).Scan(&maxFileID)
+	if err == nil && nextFileIDCounter <= maxFileID {
+		nextFileIDCounter = maxFileID + 1
 	}
 
 	now := time.Now().UTC().Format("2006-01-02 15:04:05")

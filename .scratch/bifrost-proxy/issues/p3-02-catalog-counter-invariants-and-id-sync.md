@@ -4,10 +4,10 @@
 
 **Blocked by:** p3-01: Iceberg Little-Endian Binary Bounds Decoder and Column Stats Enrichment
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Define struct `SnapshotCounters` encapsulating `SchemaVersion`, `NextCatalogID`, and `NextFileID`.
-- [ ] Query base counters from preceding `ducklake_snapshot` and assign sequential IDs for new catalog entities (`schema_id`, `table_id`, `data_file_id`, `delete_file_id`) within the delta sync transaction.
-- [ ] Update `ducklake_snapshot` insertion to record advanced monotonic counters reflecting the true next available identifiers.
-- [ ] Add unit tests verifying counter invariants over 3 consecutive snapshot commits containing multiple data and delete files.
-- [ ] Confirm no ID drift exists between `ducklake_snapshot` counters and entity table MAX identifiers.
+- [x] Define struct `SnapshotCounters` encapsulating `SchemaVersion`, `NextCatalogID`, and `NextFileID`.
+- [x] Query base counters from preceding `ducklake_snapshot` and assign sequential IDs for new catalog entities (`schema_id`, `table_id`, `data_file_id`, `delete_file_id`) within the delta sync transaction.
+- [x] Update `ducklake_snapshot` insertion to record advanced monotonic counters reflecting the true next available identifiers.
+- [x] Add unit tests verifying counter invariants over 3 consecutive snapshot commits containing multiple data and delete files.
+- [x] Confirm no ID drift exists between `ducklake_snapshot` counters and entity table MAX identifiers.

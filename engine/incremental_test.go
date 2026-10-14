@@ -802,6 +802,128 @@ func TestDuckLakeSnapshotMonotonicCountersAndChanges(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, changes3, "inserted_into_table:1")
 	assert.Contains(t, changes3, "altered_table:1")
+
+	// Verify Invariants: next_catalog_id and next_file_id are strictly greater than entity max IDs
+	var maxCatID, maxFileID int64
+	err = db.QueryRow("SELECT COALESCE(MAX(table_id), 0) FROM ducklake_catalog.ducklake_table;").Scan(&maxCatID)
+	require.NoError(t, err)
+	assert.Greater(t, nextCat3, maxCatID)
+
+	err = db.QueryRow("SELECT COALESCE(MAX(data_file_id), 0) FROM ducklake_catalog.ducklake_data_file;").Scan(&maxFileID)
+	require.NoError(t, err)
+	assert.Greater(t, nextFile3, maxFileID)
+}
+
+func TestSnapshotCountersInvariantsWithDeleteFiles(t *testing.T) {
+	db, err := sql.Open("duckdb", "?access_mode=read_write")
+	require.NoError(t, err)
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE SCHEMA IF NOT EXISTS ducklake_catalog;
+		CREATE TABLE ducklake_catalog.ducklake_schema (schema_id BIGINT, schema_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_table (table_id BIGINT, table_uuid VARCHAR, begin_snapshot BIGINT, end_snapshot BIGINT, schema_id BIGINT, table_name VARCHAR, path VARCHAR, path_is_relative BOOLEAN);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot (snapshot_id BIGINT, snapshot_time VARCHAR, schema_version INT, next_catalog_id INT, next_file_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_data_file (data_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, file_order BIGINT, path VARCHAR, path_is_relative BOOLEAN, file_format VARCHAR, record_count BIGINT, file_size_bytes BIGINT, partition_id INT);
+		CREATE TABLE ducklake_catalog.ducklake_delete_file (delete_file_id BIGINT, table_id BIGINT, begin_snapshot BIGINT, end_snapshot BIGINT, data_file_id BIGINT, path VARCHAR, path_is_relative BOOLEAN, format VARCHAR, delete_count BIGINT, file_size_bytes BIGINT);
+		CREATE TABLE ducklake_catalog.ducklake_column (column_id INT, begin_snapshot BIGINT, end_snapshot BIGINT, table_id BIGINT, column_order INT, column_name VARCHAR, column_type VARCHAR, default_value VARCHAR, nulls_allowed BOOLEAN, default_value_type VARCHAR, default_value_dialect VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_snapshot_changes (snapshot_id BIGINT, changes_made VARCHAR, author VARCHAR, commit_message VARCHAR, commit_extra_info VARCHAR);
+		CREATE TABLE ducklake_catalog.ducklake_file_column_stats (data_file_id BIGINT, table_id BIGINT, column_id BIGINT, column_size_bytes BIGINT, value_count BIGINT, null_count BIGINT, min_value VARCHAR, max_value VARCHAR, contains_nan BOOLEAN, extra_stats VARCHAR);
+	`)
+	require.NoError(t, err)
+
+	metaJSON := []byte(`{
+		"format-version": 2,
+		"table-uuid": "uuid-counters",
+		"current-snapshot-id": 9103,
+		"current-schema-id": 0,
+		"last-sequence-number": 3,
+		"schemas": [
+			{"schema-id": 0, "fields": [{"id": 1, "name": "id", "type": "long"}]}
+		],
+		"snapshots": [
+			{
+				"snapshot-id": 9101,
+				"timestamp-ms": 1700000000000,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{"file_path": "s3://lakehouse/data/f1.parquet", "file_size_in_bytes": 100, "record_count": 10, "content": 0},
+					{"file_path": "s3://lakehouse/data/f2.parquet", "file_size_in_bytes": 200, "record_count": 20, "content": 0}
+				]
+			},
+			{
+				"snapshot-id": 9102,
+				"timestamp-ms": 1700000001000,
+				"summary": {"operation": "delete"},
+				"data-files": [
+					{"file_path": "s3://lakehouse/data/del1.parquet", "file_size_in_bytes": 50, "record_count": 1, "content": 1, "referenced_path": "s3://lakehouse/data/f1.parquet"}
+				]
+			},
+			{
+				"snapshot-id": 9103,
+				"timestamp-ms": 1700000002000,
+				"summary": {"operation": "append"},
+				"data-files": [
+					{"file_path": "s3://lakehouse/data/f3.parquet", "file_size_in_bytes": 300, "record_count": 30, "content": 0},
+					{"file_path": "s3://lakehouse/data/del2.parquet", "file_size_in_bytes": 60, "record_count": 2, "content": 1, "referenced_path": "s3://lakehouse/data/f2.parquet"}
+				]
+			}
+		]
+	}`)
+
+	mockStore := &mockStorageService{files: make(map[string][]byte)}
+	mockStore.files["s3://lakehouse/bronze/counters/metadata/v1.json"] = metaJSON
+	syncEng := engine.NewTestSyncEngine(db, mockStore)
+
+	// Commit 1: 2 data files
+	task1 := engine.CommitTask{
+		Table:            domain.TableIdentifier{Namespace: "bronze", Table: "counters"},
+		MetadataLocation: "s3://lakehouse/bronze/counters/metadata/v1.json",
+		SnapshotID:       9101,
+	}
+	require.NoError(t, syncEng.SyncDeltaIncremental(task1))
+
+	// Commit 2: 1 delete file
+	task2 := engine.CommitTask{
+		Table:            domain.TableIdentifier{Namespace: "bronze", Table: "counters"},
+		MetadataLocation: "s3://lakehouse/bronze/counters/metadata/v1.json",
+		SnapshotID:       9102,
+	}
+	require.NoError(t, syncEng.SyncDeltaIncremental(task2))
+
+	// Commit 3: 1 data file + 1 delete file
+	task3 := engine.CommitTask{
+		Table:            domain.TableIdentifier{Namespace: "bronze", Table: "counters"},
+		MetadataLocation: "s3://lakehouse/bronze/counters/metadata/v1.json",
+		SnapshotID:       9103,
+	}
+	require.NoError(t, syncEng.SyncDeltaIncremental(task3))
+
+	// Check Invariants across all snapshots
+	rows, err := db.Query("SELECT snapshot_id, schema_version, next_catalog_id, next_file_id FROM ducklake_catalog.ducklake_snapshot ORDER BY snapshot_id ASC;")
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var maxTableID, maxSchemaID, maxDataFileID, maxDeleteFileID int64
+	require.NoError(t, db.QueryRow("SELECT COALESCE(MAX(table_id), 0) FROM ducklake_catalog.ducklake_table;").Scan(&maxTableID))
+	require.NoError(t, db.QueryRow("SELECT COALESCE(MAX(schema_id), 0) FROM ducklake_catalog.ducklake_schema;").Scan(&maxSchemaID))
+	require.NoError(t, db.QueryRow("SELECT COALESCE(MAX(data_file_id), 0) FROM ducklake_catalog.ducklake_data_file;").Scan(&maxDataFileID))
+	require.NoError(t, db.QueryRow("SELECT COALESCE(MAX(delete_file_id), 0) FROM ducklake_catalog.ducklake_delete_file;").Scan(&maxDeleteFileID))
+
+	count := 0
+	var lastNextFileID int64
+	for rows.Next() {
+		count++
+		var snapID, sVer, nextCat, nextFile int64
+		require.NoError(t, rows.Scan(&snapID, &sVer, &nextCat, &nextFile))
+		assert.Greater(t, nextCat, maxTableID, "next_catalog_id must be strictly greater than any table_id")
+		assert.Greater(t, nextCat, maxSchemaID, "next_catalog_id must be strictly greater than any schema_id")
+		assert.Greater(t, nextFile, lastNextFileID, "next_file_id must strictly increase monotonically across snapshots")
+		lastNextFileID = nextFile
+	}
+	assert.Equal(t, 3, count, "3 snapshots must be recorded")
+	assert.Greater(t, lastNextFileID, maxDataFileID, "final next_file_id must be greater than max data_file_id")
+	assert.Greater(t, lastNextFileID, maxDeleteFileID, "final next_file_id must be greater than max delete_file_id")
 }
 
 
