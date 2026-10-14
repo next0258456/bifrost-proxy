@@ -138,7 +138,11 @@ func DecodeIcebergBinaryBound(rawBytes []byte, icebergType string) (string, erro
 		scale := 0
 		if idx := strings.Index(t, ","); idx > 0 {
 			scaleStr := strings.TrimRight(strings.TrimSpace(t[idx+1:]), ")")
-			scale, _ = strconv.Atoi(scaleStr)
+			var err error
+			scale, err = strconv.Atoi(scaleStr)
+			if err != nil {
+				return "", fmt.Errorf("invalid decimal scale in %q: %w", icebergType, err)
+			}
 		}
 		if scale <= 0 {
 			return unscaled.String(), nil
@@ -418,6 +422,9 @@ func ReadManifestFileWithColTypes(data []byte, colTypes map[int64]string) (added
 				decoded, err := DecodeIcebergBinaryBound(b, colType)
 				if err == nil && decoded != "" {
 					return &decoded
+				}
+				if err != nil && colType != "" {
+					log.Printf("Warning: failed to decode binary bound for column %d (%s): %v", colID, colType, err)
 				}
 				if utf8.Valid(b) {
 					s := string(b)

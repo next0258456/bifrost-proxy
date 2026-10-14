@@ -655,23 +655,27 @@ func (e *SyncEngine) syncSnapshotInternal(task CommitTask, meta *IcebergMetadata
 
 	// Đảm bảo invariant đơn điệu chặt chẽ: next_catalog_id > max(catalog_entities), next_file_id > max(file_entities)
 	var maxCatalogID, maxFileID int64
-	err = tx.QueryRow(`
+	if err := tx.QueryRow(`
 		SELECT GREATEST(
 			COALESCE((SELECT MAX(schema_id) FROM ducklake_catalog.ducklake_schema), 0),
 			COALESCE((SELECT MAX(table_id) FROM ducklake_catalog.ducklake_table), 0)
 		);
-	`).Scan(&maxCatalogID)
-	if err == nil && nextCatalogID <= maxCatalogID {
+	`).Scan(&maxCatalogID); err != nil {
+		return fmt.Errorf("failed to query max catalog entity id for invariants: %w", err)
+	}
+	if nextCatalogID <= maxCatalogID {
 		nextCatalogID = maxCatalogID + 1
 	}
 
-	err = tx.QueryRow(`
+	if err := tx.QueryRow(`
 		SELECT GREATEST(
 			COALESCE((SELECT MAX(data_file_id) FROM ducklake_catalog.ducklake_data_file), 0),
 			COALESCE((SELECT MAX(delete_file_id) FROM ducklake_catalog.ducklake_delete_file), 0)
 		);
-	`).Scan(&maxFileID)
-	if err == nil && nextFileIDCounter <= maxFileID {
+	`).Scan(&maxFileID); err != nil {
+		return fmt.Errorf("failed to query max file entity id for invariants: %w", err)
+	}
+	if nextFileIDCounter <= maxFileID {
 		nextFileIDCounter = maxFileID + 1
 	}
 

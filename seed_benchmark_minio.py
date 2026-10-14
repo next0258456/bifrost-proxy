@@ -1,4 +1,5 @@
 import boto3
+from botocore.exceptions import ClientError
 
 s3 = boto3.client(
     's3',
@@ -9,8 +10,10 @@ s3 = boto3.client(
 
 try:
     s3.create_bucket(Bucket='lakehouse')
-except Exception:
-    pass
+except ClientError as e:
+    code = e.response.get('Error', {}).get('Code', '')
+    if code not in ('BucketAlreadyOwnedByYou', 'BucketAlreadyExists'):
+        raise
 
 metadata = '''{
     "format-version": 2,
